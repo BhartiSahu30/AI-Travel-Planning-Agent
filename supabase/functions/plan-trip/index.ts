@@ -9,6 +9,7 @@ const corsHeaders = {
 
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const OPENWEATHER_API_KEY = Deno.env.get("OPENWEATHER_API_KEY") ?? "";
+const GEOAPIFY_API_KEY = Deno.env.get("GEOAPIFY_API_KEY") ?? "";
 // Model: gemini-3.5-flash (current stable; gemini-2.5-flash is deprecated for new users)
 const GEMINI_MODEL = "gemini-3.5-flash";
 
@@ -57,6 +58,19 @@ interface LiveWeatherDay {
   humidity: number;
   rain_probability: number;
   icon: string;
+}
+
+interface GeoPoint {
+  lat: number;
+  lon: number;
+}
+
+interface GeoapifyPlace {
+  name: string;
+  lat?: number;
+  lon?: number;
+  categories?: string[];
+  datasource?: { raw?: Record<string, unknown> };
 }
 
 const REQUIRED_FIELDS: (keyof TripRequest)[] = [
@@ -267,6 +281,159 @@ async function fetchLiveWeather(destination: string, start?: string, end?: strin
   return result;
 }
 
+// ---- Nominatim geocoding (OpenStreetMap) ----
+
+async function geocode(query: string): Promise<GeoPoint | null> {
+  if (!query) return null;
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&limit=1`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "TravelGenie/1.0 (trip planner)",
+      "Accept-Language": "en",
+    },
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{ lat?: string; lon?: string }>;
+  if (!Array.isArray(data) || data.length === 0) return null;
+  const lat = parseFloat(data[0].lat ?? "");
+  const lon = parseFloat(data[0].lon ?? "");
+  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  return { lat, lon };
+}
+
+// ---- Geoapify Places API ----
+
+interface GeoapifyResult {
+  properties: {
+    name?: string;
+    categories?: Record<string, string>;
+    datasource?: { raw?: Record<string, unknown> };
+  };
+  geometry: {
+    coordinates: [number, number]; // [lon, lat]
+  };
+}
+
+async function fetchGeoapifyPlaces(
+  center: GeoPoint,
+  categories: string,
+  limit: number
+): Promise<GeoapifyResult[]> {
+  if (!GEOAPIFY_API_KEY) return [];
+  const radius = 10000; // 10km
+  const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(categories)}&filter=circle:${center.lon},${center.lat},${radius}&limit=${limit}&apiKey=${GEOAPIFY_API_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.warn(`Geoapify Places error ${res.status} for categories=${categories}`);
+    return [];
+  }
+  const data = await res.json();
+  return (data?.features ?? []) as GeoapifyResult[];
+}
+
+function enrichPlaces(
+  planPlaces: Array<{ name: string; lat?: number; lon?: number }>,
+  geoPlaces: GeoapifyResult[],
+  maxN: number
+): void {
+  // Match by name (case-insensitive substring); fill in lat/lon where missing.
+  const used = new Set<number>();
+  for (const p of planPlaces) {
+    if (p.lat !== undefined && p.lon !== undefined) continue;
+    const nameLower = p.name.toLowerCase().trim();
+    let matchedIdx = -1;
+    for (let i = 0; i < geoPlaces.length; i++) {
+      if (used.has(i)) continue;
+      const gName = (geoPlaces[i].properties.name ?? "").toLowerCase().trim();
+      if (gName && (gName === nameLower || gName.includes(nameLower) || nameLower.includes(gName))) {
+        matchedIdx = i;
+        break;
+      }
+    }
+    if (matchedIdx >= 0) {
+      used.add(matchedIdx);
+      const [lon, lat] = geoPlaces[matchedIdx].geometry.coordinates;
+      p.lat = lat;
+      p.lon = lon;
+    }
+  }
+  // If no name match, assign nearest unused Geoapify results to places missing coords (up to maxN)
+  let geoIdx = 0;
+  for (const p of planPlaces) {
+    if (p.lat !== undefined && p.lon !== undefined) continue;
+    if (geoIdx >= maxN) break;
+    while (geoIdx < geoPlaces.length && used.has(geoIdx)) geoIdx++;
+    if (geoIdx >= geoPlaces.length) break;
+    used.add(geoIdx);
+    const [lon, lat] = geoPlaces[geoIdx].geometry.coordinates;
+    p.lat = lat;
+    p.lon = lon;
+    geoIdx++;
+  }
+}
+
+async function enrichPlanWithPlaces(
+  plan: Record<string, unknown>,
+  destination: string
+): Promise<void> {
+  let center: GeoPoint | null = null;
+  try {
+    center = await geocode(destination);
+  } catch (e) {
+    console.warn("Nominatim geocode failed:", e instanceof Error ? e.message : e);
+  }
+  if (!center) return;
+
+  (plan as { map_center?: GeoPoint }).map_center = center;
+
+  const hotels = (plan.hotels ?? []) as Array<{ name: string; lat?: number; lon?: number }>;
+  const restaurants = (plan.restaurants ?? []) as Array<{ name: string; lat?: number; lon?: number }>;
+  const attractions = (plan.attractions ?? []) as Array<{ name: string; lat?: number; lon?: number }>;
+
+  if (GEOAPIFY_API_KEY) {
+    // Fetch all three categories in parallel from Geoapify Places (non-fatal)
+    const [hotelPlaces, restPlaces, attractPlaces] = await Promise.all([
+      fetchGeoapifyPlaces(center, "accommodation", 10).catch(() => []),
+      fetchGeoapifyPlaces(center, "catering", 10).catch(() => []),
+      fetchGeoapifyPlaces(center, "tourism", 10).catch(() => []),
+    ]);
+
+    enrichPlaces(hotels, hotelPlaces, 5);
+    enrichPlaces(restaurants, restPlaces, 5);
+    enrichPlaces(attractions, attractPlaces, 5);
+  }
+
+  // Fallback: geocode up to 3 places per category via Nominatim if still missing coords.
+  // Nominatim policy requires end-user-triggered, moderate use — we cap requests and
+  // only fill gaps so the map isn't empty when Geoapify is unavailable.
+  await fillMissingCoords(hotels, destination, 3);
+  await fillMissingCoords(restaurants, destination, 3);
+  await fillMissingCoords(attractions, destination, 3);
+}
+
+async function fillMissingCoords(
+  places: Array<{ name: string; lat?: number; lon?: number }>,
+  destination: string,
+  maxN: number
+): Promise<void> {
+  let filled = 0;
+  for (const p of places) {
+    if (filled >= maxN) break;
+    if (p.lat !== undefined && p.lon !== undefined) continue;
+    const query = `${p.name}, ${destination}`;
+    try {
+      const pt = await geocode(query);
+      if (pt) {
+        p.lat = pt.lat;
+        p.lon = pt.lon;
+        filled++;
+      }
+    } catch {
+      /* skip */
+    }
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -350,6 +517,14 @@ Deno.serve(async (req: Request) => {
     // Ensure the plan uses the live weather data (override any Gemini-invented weather)
     if (liveWeather.length > 0) {
       plan.weather = liveWeather;
+    }
+
+    // Enrich hotels/restaurants/attractions with real coordinates from Geoapify Places
+    // (geocoded via Nominatim). Non-fatal — plan still returns without map data if it fails.
+    try {
+      await enrichPlanWithPlaces(plan as Record<string, unknown>, body.destination ?? "");
+    } catch (e) {
+      console.warn("Place enrichment failed:", e instanceof Error ? e.message : e);
     }
 
     return new Response(

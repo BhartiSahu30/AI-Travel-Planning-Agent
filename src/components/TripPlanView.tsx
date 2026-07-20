@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   CloudSun,
@@ -6,6 +6,7 @@ import {
   Hotel,
   Lightbulb,
   MapPin,
+  Map as MapIcon,
   PackageCheck,
   Phone,
   Plane,
@@ -17,10 +18,27 @@ import {
 } from 'lucide-react';
 import { Badge } from './ui/Badge';
 import { Card, CardDescription, CardHeader, CardTitle } from './ui/Card';
+import { MapView, type MapMarker } from './MapView';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import type { TripPlan } from '../types';
 
 export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: string }) {
+  const mapMarkers: MapMarker[] = useMemo(() => {
+    const markers: MapMarker[] = [];
+    for (const h of plan.hotels ?? []) {
+      if (typeof h.lat === 'number' && typeof h.lon === 'number')
+        markers.push({ id: `hotel-${h.name}`, name: h.name, lat: h.lat, lon: h.lon, category: 'hotel', subtitle: h.area });
+    }
+    for (const r of plan.restaurants ?? []) {
+      if (typeof r.lat === 'number' && typeof r.lon === 'number')
+        markers.push({ id: `rest-${r.name}`, name: r.name, lat: r.lat, lon: r.lon, category: 'restaurant', subtitle: r.cuisine });
+    }
+    for (const a of plan.attractions ?? []) {
+      if (typeof a.lat === 'number' && typeof a.lon === 'number')
+        markers.push({ id: `attr-${a.name}`, name: a.name, lat: a.lat, lon: a.lon, category: 'attraction', subtitle: a.category });
+    }
+    return markers;
+  }, [plan.hotels, plan.restaurants, plan.attractions]);
   return (
     <div className="space-y-6">
       {/* Summary */}
@@ -101,6 +119,33 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
           )}
         </Card>
       </div>
+
+      {/* Interactive map */}
+      {plan.map_center && mapMarkers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <MapIcon className="h-5 w-5 text-brand-600 dark:text-brand-300" />
+              <CardTitle>Destination map</CardTitle>
+              <CardDescription className="ml-auto">
+                {mapMarkers.length} places · powered by OpenStreetMap
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <MapView center={plan.map_center} markers={mapMarkers} />
+          <div className="mt-3 flex flex-wrap gap-4 text-xs text-ink-500 dark:text-ink-400">
+            <span className="flex items-center gap-1.5">
+              <span className="h-3 w-3 rounded-full bg-blue-600" /> Hotels
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-3 w-3 rounded-full bg-amber-500" /> Restaurants
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-3 w-3 rounded-full bg-emerald-500" /> Attractions
+            </span>
+          </div>
+        </Card>
+      )}
 
       {/* Transportation */}
       <Card>

@@ -68,6 +68,7 @@ export interface TripPlan {
     rain_probability: number;
     icon: string;
   }[];
+  map_center?: { lat: number; lon: number };
   hotels: {
     name: string;
     price_per_night: number;
@@ -75,6 +76,8 @@ export interface TripPlan {
     area: string;
     reason: string;
     amenities: string[];
+    lat?: number;
+    lon?: number;
   }[];
   restaurants: {
     name: string;
@@ -82,6 +85,8 @@ export interface TripPlan {
     price_level: number;
     rating: number;
     reason: string;
+    lat?: number;
+    lon?: number;
   }[];
   attractions: {
     name: string;
@@ -89,6 +94,8 @@ export interface TripPlan {
     duration_hours: number;
     rating: number;
     reason: string;
+    lat?: number;
+    lon?: number;
   }[];
   transportation: {
     to_destination: string;
