@@ -150,3 +150,54 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
 }
+
+export interface DiscoveryGalleryImage {
+  id: string;
+  url: string;
+  thumb: string;
+  alt: string;
+  credit: string;
+}
+
+export interface DiscoveryPlace {
+  name: string;
+  category: string;
+  address: string;
+  rating: number | null;
+  lat: number;
+  lon: number;
+  image: string | null;
+  description: string;
+}
+
+export interface LocalFood {
+  name: string;
+  description: string;
+}
+
+export interface FamousPlace {
+  name: string;
+  description: string;
+}
+
+export interface DiscoveryResponse {
+  destination: string;
+  hero_image: string;
+  gallery: DiscoveryGalleryImage[];
+  famous_places: FamousPlace[];
+  local_foods: LocalFood[];
+  hotels: DiscoveryPlace[];
+  restaurants: DiscoveryPlace[];
+  attractions: DiscoveryPlace[];
+  weather: {
+    date: string;
+    condition: string;
+    high: number;
+    low: number;
+    humidity: number;
+    rain_probability: number;
+    icon: string;
+  }[];
+  map_center: { lat: number; lon: number } | null;
+  error?: string;
+}

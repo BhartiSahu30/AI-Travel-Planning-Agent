@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import type {
   ChatMessage,
+  DiscoveryResponse,
   PlanTripRequest,
   PlanTripResponse,
   Preferences,
@@ -53,6 +54,20 @@ export async function chatWithAgent(
     return { needs_more_info: false, error: data?.error ?? `Request failed (${res.status})` };
   }
   return data;
+}
+
+export async function discoverDestination(destination: string): Promise<DiscoveryResponse> {
+  const url = await functionUrl('plan-trip');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: JSON.stringify({ action: 'discover', destination }),
+  });
+  const data = await res.json().catch(() => ({ error: 'Invalid response from server' }));
+  if (!res.ok) {
+    return { error: data?.error ?? `Request failed (${res.status})` } as DiscoveryResponse;
+  }
+  return data as DiscoveryResponse;
 }
 
 // ---- Profiles ----

@@ -10,6 +10,7 @@ import { Login } from './pages/auth/Login';
 import { Register } from './pages/auth/Register';
 import { ForgotPassword } from './pages/auth/ForgotPassword';
 import { Dashboard } from './pages/Dashboard';
+import { DestinationDiscovery } from './pages/DestinationDiscovery';
 import { PlanNewTrip } from './pages/PlanNewTrip';
 import { PlanningProgress } from './pages/PlanningProgress';
 import { TripDetails } from './pages/TripDetails';
@@ -46,6 +47,7 @@ export default function App() {
                 }
               >
                 <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/discover" element={<DestinationDiscovery />} />
                 <Route path="/trips/new" element={<PlanNewTrip />} />
                 <Route path="/trips/progress" element={<PlanningProgress />} />
                 <Route path="/trips/:id" element={<TripDetails />} />

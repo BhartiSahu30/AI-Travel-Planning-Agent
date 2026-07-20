@@ -20,6 +20,7 @@ import { cn, initials } from '../lib/utils';
 
 const nav = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/trips/new', label: 'New Trip', icon: PlusCircle },
   { to: '/trips', label: 'Saved Trips', icon: MapPinned },
   { to: '/profile', label: 'Profile', icon: UserIcon },

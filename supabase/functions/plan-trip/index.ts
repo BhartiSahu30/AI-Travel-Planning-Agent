@@ -10,6 +10,12 @@ const corsHeaders = {
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const OPENWEATHER_API_KEY = Deno.env.get("OPENWEATHER_API_KEY") ?? "";
 const GEOAPIFY_API_KEY = Deno.env.get("GEOAPIFY_API_KEY") ?? "";
+const UNSPLASH_API_KEY = Deno.env.get("UNSPLASH_API_KEY") ?? "";
+
+const DEFAULT_HERO_IMAGE =
+  "https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=1600&q=80";
+const DEFAULT_PLACE_IMAGE =
+  "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=600&q=80";
 // Model: gemini-3.5-flash (current stable; gemini-2.5-flash is deprecated for new users)
 const GEMINI_MODEL = "gemini-3.5-flash";
 
@@ -434,6 +440,124 @@ async function fillMissingCoords(
   }
 }
 
+// ---- Unsplash images ----
+
+interface UnsplashImage {
+  id: string;
+  urls: { regular: string; small: string; full: string };
+  alt_description: string | null;
+  user: { name: string };
+  links?: { html?: string };
+}
+
+async function fetchUnsplashImages(query: string, perPage: number): Promise<UnsplashImage[]> {
+  if (!UNSPLASH_API_KEY) return [];
+  const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape&content_filter=high`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Client-ID ${UNSPLASH_API_KEY}`,
+      "Accept-Version": "v1",
+    },
+  });
+  if (!res.ok) {
+    console.warn(`Unsplash error ${res.status}`);
+    return [];
+  }
+  const data = await res.json();
+  return (data?.results ?? []) as UnsplashImage[];
+}
+
+function defaultGallery(destination: string): UnsplashImage[] {
+  return Array.from({ length: 6 }, (_, i) => ({
+    id: `default-${i}`,
+    urls: { regular: DEFAULT_PLACE_IMAGE, small: DEFAULT_PLACE_IMAGE, full: DEFAULT_HERO_IMAGE },
+    alt_description: `${destination} travel photo`,
+    user: { name: "Unsplash" },
+  }));
+}
+
+// ---- Geoapify Places with details ----
+
+interface DiscoveryPlace {
+  name: string;
+  category: string;
+  address: string;
+  rating: number | null;
+  lat: number;
+  lon: number;
+  image: string | null;
+  description: string;
+}
+
+async function fetchDiscoveryPlaces(
+  center: GeoPoint,
+  categories: string,
+  limit: number
+): Promise<DiscoveryPlace[]> {
+  if (!GEOAPIFY_API_KEY) return [];
+  const radius = 10000;
+  const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(categories)}&filter=circle:${center.lon},${center.lat},${radius}&limit=${limit}&apiKey=${GEOAPIFY_API_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.warn(`Geoapify Places error ${res.status}`);
+    return [];
+  }
+  const data = await res.json();
+  const features = (data?.features ?? []) as GeoapifyResult[];
+  const places: DiscoveryPlace[] = [];
+  for (const f of features) {
+    const props = f.properties;
+    const [lon, lat] = f.geometry.coordinates;
+    const cats = props.categories ?? {};
+    const catKeys = Object.keys(cats);
+    const raw = props.datasource?.raw ?? {};
+    places.push({
+      name: props.name ?? "Unknown",
+      category: catKeys[0]?.replace(/\./g, " ") ?? "place",
+      address:
+        (raw["addr:housenumber"] ?? "") + " " + (raw["addr:street"] ?? "") + " " + (raw["addr:city"] ?? "") + " " + (raw["addr:country"] ?? "")
+          .trim() || raw["addr:full"] || raw["address"] || "",
+      rating: typeof raw["rating"] === "number" ? raw["rating"] : null,
+      lat,
+      lon,
+      image: null,
+      description: raw["description"] ?? raw["wikipedia"] ?? cats[catKeys[0]] ?? "",
+    });
+  }
+  return places;
+}
+
+// ---- Gemini local foods + famous places ----
+
+interface LocalFood {
+  name: string;
+  description: string;
+}
+
+interface FamousPlace {
+  name: string;
+  description: string;
+}
+
+async function generateLocalHighlights(destination: string): Promise<{ foods: LocalFood[]; places: FamousPlace[] }> {
+  if (!GEMINI_API_KEY) return { foods: [], places: [] };
+  const prompt = `You are a travel expert. For the destination "${destination}", generate:
+1. The top 5 famous local foods that a visitor must try.
+2. The top 5 must-visit places (landmarks, neighborhoods, or experiences).
+
+Return ONLY valid JSON with this exact shape (no markdown, no commentary):
+{
+  "foods": [{ "name": "Food name", "description": "One short sentence describing the dish and why it's special." }],
+  "places": [{ "name": "Place name", "description": "One short sentence describing the place and why it's a must-visit." }]
+}`;
+  const text = await callGemini(prompt);
+  const parsed = tryParseJson(text) as { foods?: LocalFood[]; places?: FamousPlace[] };
+  return {
+    foods: Array.isArray(parsed.foods) ? parsed.foods.slice(0, 5) : [],
+    places: Array.isArray(parsed.places) ? parsed.places.slice(0, 5) : [],
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -469,6 +593,55 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ weather }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    if (action === "discover") {
+      const destination = body.destination ?? "";
+      if (!destination) {
+        return new Response(JSON.stringify({ error: "Destination is required" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Geocode destination (Nominatim)
+      let center: GeoPoint | null = null;
+      try {
+        center = await geocode(destination);
+      } catch (e) {
+        console.warn("Nominatim geocode failed:", e instanceof Error ? e.message : e);
+      }
+
+      // Fetch images, places, weather, and AI highlights in parallel (non-fatal)
+      const [images, hotels, restaurants, attractions, highlights, weather] = await Promise.all([
+        fetchUnsplashImages(`${destination} travel`, 12).catch(() => []),
+        center ? fetchDiscoveryPlaces(center, "accommodation", 8).catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "catering", 8).catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "tourism", 8).catch(() => []) : Promise.resolve([]),
+        generateLocalHighlights(destination).catch(() => ({ foods: [], places: [] })),
+        fetchLiveWeather(destination, undefined, undefined).catch(() => []),
+      ]);
+
+      const gallery = images.length > 0 ? images : defaultGallery(destination);
+      const hero = gallery[0]?.urls?.full ?? gallery[0]?.urls?.regular ?? DEFAULT_HERO_IMAGE;
+
+      return new Response(JSON.stringify({
+        destination,
+        hero_image: hero,
+        gallery: gallery.map((img) => ({
+          id: img.id,
+          url: img.urls.regular,
+          thumb: img.urls.small,
+          alt: img.alt_description ?? `${destination} travel photo`,
+          credit: img.user.name,
+        })),
+        famous_places: highlights.places,
+        local_foods: highlights.foods,
+        hotels,
+        restaurants,
+        attractions,
+        weather,
+        map_center: center,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     if (action === "chat") {
