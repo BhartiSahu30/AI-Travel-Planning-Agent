@@ -59,7 +59,15 @@ export interface TripPlan {
     total: number;
     breakdown: { category: string; amount: number }[];
   };
-  weather: { date: string; condition: string; high: number; low: number }[];
+  weather: {
+    date: string;
+    condition: string;
+    high: number;
+    low: number;
+    humidity: number;
+    rain_probability: number;
+    icon: string;
+  }[];
   hotels: {
     name: string;
     price_per_night: number;

@@ -8,6 +8,7 @@ const corsHeaders = {
 };
 
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
+const OPENWEATHER_API_KEY = Deno.env.get("OPENWEATHER_API_KEY") ?? "";
 // Model: gemini-3.5-flash (current stable; gemini-2.5-flash is deprecated for new users)
 const GEMINI_MODEL = "gemini-3.5-flash";
 
@@ -48,6 +49,16 @@ interface TripRequest {
   history?: { role: "user" | "assistant"; content: string }[];
 }
 
+interface LiveWeatherDay {
+  date: string;
+  condition: string;
+  high: number;
+  low: number;
+  humidity: number;
+  rain_probability: number;
+  icon: string;
+}
+
 const REQUIRED_FIELDS: (keyof TripRequest)[] = [
   "departure_city",
   "destination",
@@ -66,9 +77,12 @@ function missingFields(req: TripRequest): string[] {
   return missing;
 }
 
-function buildUserPrompt(req: TripRequest): string {
+function buildUserPrompt(req: TripRequest, liveWeather?: LiveWeatherDay[]): string {
   const prefs = req.preferences ?? {};
   const travelers = req.travelers ?? {};
+  const weatherSection = liveWeather && liveWeather.length > 0
+    ? `\n\nLIVE WEATHER FORECAST (use this exact data for the weather field — do not invent your own):\n${JSON.stringify(liveWeather, null, 2)}\n`
+    : "";
   return `Plan a trip with the following details:
 - Departure city: ${req.departure_city ?? "not specified"}
 - Destination: ${req.destination ?? "not specified"}
@@ -81,7 +95,7 @@ function buildUserPrompt(req: TripRequest): string {
 - Food preference: ${prefs.food ?? "any"}
 - Accessibility needs: ${prefs.accessibility ?? "none"}
 - Interests: ${(prefs.interests ?? []).join(", ") || "general"}
-- Special notes: ${prefs.notes ?? "none"}
+- Special notes: ${prefs.notes ?? "none"}${weatherSection}
 
 Return ONLY a valid JSON object with this exact shape:
 {
@@ -91,7 +105,7 @@ Return ONLY a valid JSON object with this exact shape:
     "total": 0,
     "breakdown": [{ "category": "Flights", "amount": 0 }, { "category": "Hotels", "amount": 0 }, { "category": "Food", "amount": 0 }, { "category": "Transport", "amount": 0 }, { "category": "Activities", "amount": 0 }, { "category": "Misc", "amount": 0 }]
   },
-  "weather": [{ "date": "YYYY-MM-DD", "condition": "Sunny", "high": 0, "low": 0 }],
+  "weather": [{ "date": "YYYY-MM-DD", "condition": "Sunny", "high": 0, "low": 0, "humidity": 0, "rain_probability": 0, "icon": "01d" }],
   "hotels": [{ "name": "", "price_per_night": 0, "rating": 0, "area": "", "reason": "", "amenities": [] }],
   "restaurants": [{ "name": "", "cuisine": "", "price_level": 1, "rating": 0, "reason": "" }],
   "attractions": [{ "name": "", "category": "", "duration_hours": 0, "rating": 0, "reason": "" }],
@@ -102,10 +116,10 @@ Return ONLY a valid JSON object with this exact shape:
   "emergency": { "police": "", "ambulance": "", "embassy": "", "notes": "" }
 }
 
-Do not include markdown fences or any text outside the JSON.`;
+For the weather field, copy the LIVE WEATHER FORECAST data exactly (including humidity, rain_probability, and icon). Do not include markdown fences or any text outside the JSON.`;
 }
 
-function getClient(): GoogleGenAI {
+function getGeminiClient(): GoogleGenAI {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY is not configured. Add it as a secret to this Supabase project.");
   }
@@ -113,7 +127,7 @@ function getClient(): GoogleGenAI {
 }
 
 async function callGemini(prompt: string): Promise<string> {
-  const ai = getClient();
+  const ai = getGeminiClient();
   const response = await ai.models.generateContent({
     model: GEMINI_MODEL,
     contents: prompt,
@@ -147,6 +161,112 @@ function tryParseJson(text: string): unknown {
   }
 }
 
+// ---- OpenWeather integration ----
+
+function toDateString(dt: number): string {
+  return new Date(dt * 1000).toISOString().slice(0, 10);
+}
+
+function tripDates(start?: string, end?: string): string[] {
+  if (!start || !end) return [];
+  const s = new Date(start + "T00:00:00Z");
+  const e = new Date(end + "T00:00:00Z");
+  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return [];
+  const dates: string[] = [];
+  const cur = new Date(s);
+  // Cap to 5 days (OpenWeather free tier covers 5 days forecast)
+  let count = 0;
+  while (cur <= e && count < 5) {
+    dates.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+    count++;
+  }
+  return dates;
+}
+
+async function fetchLiveWeather(destination: string, start?: string, end?: string): Promise<LiveWeatherDay[]> {
+  if (!OPENWEATHER_API_KEY) return [];
+  if (!destination) return [];
+
+  const url = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(destination)}&units=metric&appid=${OPENWEATHER_API_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`OpenWeather API error ${res.status}: ${errText}`);
+  }
+  const data = await res.json();
+  const list: Array<Record<string, unknown>> = data?.list ?? [];
+
+  // Aggregate 3-hour entries into daily summaries
+  const byDate = new Map<string, {
+    highs: number[];
+    lows: number[];
+    humidities: number[];
+    pops: number[];
+    conditions: Record<string, number>;
+    icons: Record<string, number>;
+  }>();
+
+  for (const entry of list) {
+    const dt = entry.dt as number;
+    if (!dt) continue;
+    const date = toDateString(dt);
+    const main = entry.main as { temp_max?: number; temp_min?: number; humidity?: number } | undefined;
+    const weather = entry.weather as Array<{ main?: string; icon?: string }> | undefined;
+    const pop = (entry.pop as number) ?? 0;
+
+    let bucket = byDate.get(date);
+    if (!bucket) {
+      bucket = { highs: [], lows: [], humidities: [], pops: [], conditions: {}, icons: {} };
+      byDate.set(date, bucket);
+    }
+    if (typeof main?.temp_max === "number") bucket.highs.push(main.temp_max);
+    if (typeof main?.temp_min === "number") bucket.lows.push(main.temp_min);
+    if (typeof main?.humidity === "number") bucket.humidities.push(main.humidity);
+    bucket.pops.push(pop);
+    const cond = weather?.[0]?.main ?? "Unknown";
+    bucket.conditions[cond] = (bucket.conditions[cond] ?? 0) + 1;
+    const icon = weather?.[0]?.icon ?? "01d";
+    bucket.icons[icon] = (bucket.icons[icon] ?? 0) + 1;
+  }
+
+  function avg(arr: number[]): number {
+    if (arr.length === 0) return 0;
+    return Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+  }
+  function maxByCount(rec: Record<string, number>): string {
+    let best = "";
+    let bestN = -1;
+    for (const [k, n] of Object.entries(rec)) {
+      if (n > bestN) {
+        best = k;
+        bestN = n;
+      }
+    }
+    return best;
+  }
+
+  const wanted = tripDates(start, end);
+  const allDates = Array.from(byDate.keys()).sort();
+  const targetDates = wanted.length > 0 ? wanted : allDates.slice(0, 5);
+
+  const result: LiveWeatherDay[] = [];
+  for (const date of targetDates) {
+    const b = byDate.get(date);
+    if (!b) continue;
+    result.push({
+      date,
+      condition: maxByCount(b.conditions),
+      high: b.highs.length ? Math.round(Math.max(...b.highs)) : 0,
+      low: b.lows.length ? Math.round(Math.min(...b.lows)) : 0,
+      humidity: avg(b.humidities),
+      rain_probability: Math.round(Math.max(...b.pops, 0) * 100),
+      icon: maxByCount(b.icons),
+    });
+  }
+  return result;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -157,8 +277,7 @@ Deno.serve(async (req: Request) => {
     const action = body.action ?? "plan";
 
     if (action === "list-models") {
-      const ai = getClient();
-      // Try the SDK first
+      const ai = getGeminiClient();
       let names: string[] = [];
       try {
         const page = await ai.models.list();
@@ -174,6 +293,13 @@ Deno.serve(async (req: Request) => {
         names = (data?.models ?? []).map((m: { name?: string }) => m.name ?? "").filter(Boolean);
       }
       return new Response(JSON.stringify({ models: names }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "weather") {
+      const weather = await fetchLiveWeather(body.destination ?? "", body.start_date, body.end_date);
+      return new Response(JSON.stringify({ weather }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -195,6 +321,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // action === "plan"
     const missing = missingFields(body);
     if (missing.length > 0) {
       return new Response(
@@ -208,9 +335,23 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const prompt = buildUserPrompt(body);
+    // Fetch live weather first (non-fatal — fall back to Gemini-only if it fails)
+    let liveWeather: LiveWeatherDay[] = [];
+    try {
+      liveWeather = await fetchLiveWeather(body.destination ?? "", body.start_date, body.end_date);
+    } catch (e) {
+      console.warn("OpenWeather fetch failed:", e instanceof Error ? e.message : e);
+    }
+
+    const prompt = buildUserPrompt(body, liveWeather);
     const text = await callGemini(prompt);
-    const plan = tryParseJson(text);
+    const plan = tryParseJson(text) as Record<string, unknown>;
+
+    // Ensure the plan uses the live weather data (override any Gemini-invented weather)
+    if (liveWeather.length > 0) {
+      plan.weather = liveWeather;
+    }
+
     return new Response(
       JSON.stringify({ needs_more_info: false, plan }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }

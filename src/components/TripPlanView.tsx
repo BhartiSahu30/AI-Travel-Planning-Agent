@@ -2,12 +2,14 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   CloudSun,
+  Droplets,
   Hotel,
   Lightbulb,
   MapPin,
   PackageCheck,
   Phone,
   Plane,
+  Umbrella,
   UtensilsCrossed,
   Sparkles,
   Star,
@@ -73,10 +75,26 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
               {(plan.weather ?? []).map((w) => (
                 <div key={w.date} className="rounded-xl border border-ink-200/60 bg-white/60 p-3 text-center dark:border-ink-800 dark:bg-ink-900/40">
                   <p className="text-xs text-ink-500">{formatDate(w.date)}</p>
+                  {w.icon && (
+                    <img
+                      src={`https://openweathermap.org/img/wn/${w.icon}@2x.png`}
+                      alt={w.condition}
+                      className="mx-auto mt-1 h-12 w-12"
+                      loading="lazy"
+                    />
+                  )}
                   <p className="mt-1 text-sm font-medium text-ink-900 dark:text-ink-50">{w.condition}</p>
                   <p className="mt-1 text-xs text-ink-500">
                     {w.high}° / {w.low}°
                   </p>
+                  <div className="mt-2 flex items-center justify-center gap-2 text-xs text-ink-500 dark:text-ink-400">
+                    <span className="flex items-center gap-0.5" title="Humidity">
+                      <Droplets className="h-3 w-3" /> {w.humidity ?? 0}%
+                    </span>
+                    <span className="flex items-center gap-0.5" title="Rain probability">
+                      <Umbrella className="h-3 w-3" /> {w.rain_probability ?? 0}%
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
