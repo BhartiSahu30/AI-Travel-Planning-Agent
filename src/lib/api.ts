@@ -25,6 +25,14 @@ async function authHeaders(): Promise<HeadersInit> {
   };
 }
 
+export async function orchestrateUrl(): Promise<string> {
+  return functionUrl('plan-trip');
+}
+
+export async function orchestrateHeaders(): Promise<HeadersInit> {
+  return authHeaders();
+}
+
 export async function planTrip(req: PlanTripRequest): Promise<PlanTripResponse> {
   const url = await functionUrl('plan-trip');
   const res = await fetch(url, {

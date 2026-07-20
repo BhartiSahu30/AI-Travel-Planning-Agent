@@ -204,6 +204,14 @@ function tripDates(start?: string, end?: string): string[] {
   return dates;
 }
 
+function daysBetween(start?: string, end?: string): number {
+  if (!start || !end) return 1;
+  const s = new Date(start + "T00:00:00Z").getTime();
+  const e = new Date(end + "T00:00:00Z").getTime();
+  if (Number.isNaN(s) || Number.isNaN(e)) return 1;
+  return Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1);
+}
+
 async function fetchLiveWeather(destination: string, start?: string, end?: string): Promise<LiveWeatherDay[]> {
   if (!OPENWEATHER_API_KEY) return [];
   if (!destination) return [];
@@ -558,6 +566,122 @@ Return ONLY valid JSON with this exact shape (no markdown, no commentary):
   };
 }
 
+// ---- Route optimization (nearest-neighbor + 2-opt) ----
+
+function haversineKm(a: GeoPoint, b: GeoPoint): number {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function optimizeRoute(points: GeoPoint[]): number[] {
+  const n = points.length;
+  if (n <= 1) return points.map((_, i) => i);
+  const visited = new Array(n).fill(false);
+  const order: number[] = [0];
+  visited[0] = true;
+  // Nearest-neighbor
+  for (let step = 1; step < n; step++) {
+    const last = order[order.length - 1];
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (visited[i]) continue;
+      const d = haversineKm(points[last], points[i]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0) {
+      visited[bestIdx] = true;
+      order.push(bestIdx);
+    }
+  }
+  return order;
+}
+
+function routeTotalKm(points: GeoPoint[], order: number[]): number {
+  let total = 0;
+  for (let i = 1; i < order.length; i++) {
+    total += haversineKm(points[order[i - 1]], points[order[i]]);
+  }
+  return Math.round(total);
+}
+
+// ---- Budget estimation ----
+
+function estimateBudget(
+  req: TripRequest,
+  weather: LiveWeatherDay[],
+  numDays: number
+): { currency: string; total: number; breakdown: { category: string; amount: number }[] } {
+  const currency = req.currency ?? "USD";
+  const adults = req.travelers?.adults ?? 1;
+  const children = req.travelers?.children ?? 0;
+  const totalPeople = adults + children;
+  const styleMult = req.style === "Luxury" ? 2.2 : req.style === "Budget" ? 0.6 : req.style === "Backpacking" ? 0.4 : req.style === "Business" ? 1.8 : 1;
+
+  const flights = Math.round(350 * totalPeople * styleMult);
+  const hotels = Math.round(120 * numDays * Math.ceil(totalPeople / 2) * styleMult);
+  const food = Math.round((adults * 45 + children * 25) * numDays * styleMult);
+  const transport = Math.round(25 * numDays * totalPeople * styleMult);
+  const activities = Math.round(60 * numDays * totalPeople * styleMult);
+  const misc = Math.round((flights + hotels + food + transport + activities) * 0.1);
+  const total = flights + hotels + food + transport + activities + misc;
+  return {
+    currency,
+    total,
+    breakdown: [
+      { category: "Flights", amount: flights },
+      { category: "Hotels", amount: hotels },
+      { category: "Food", amount: food },
+      { category: "Transport", amount: transport },
+      { category: "Activities", amount: activities },
+      { category: "Misc", amount: misc },
+    ],
+  };
+}
+
+// ---- Packing list generation ----
+
+function generatePackingList(weather: LiveWeatherDay[], req: TripRequest): { category: string; items: string[] }[] {
+  const clothing: string[] = [];
+  const essentials: string[] = [];
+  const documents: string[] = [];
+
+  const avgHigh = weather.length > 0 ? weather.reduce((s, w) => s + w.high, 0) / weather.length : 20;
+  const avgLow = weather.length > 0 ? weather.reduce((s, w) => s + w.low, 0) / weather.length : 15;
+  const willRain = weather.some((w) => w.rain_probability > 40);
+
+  if (avgHigh >= 25) {
+    clothing.push("T-shirts", "Shorts", "Light cotton clothes", "Sunglasses", "Sun hat");
+  } else if (avgHigh >= 15) {
+    clothing.push("Long-sleeve shirts", "Light jacket", "Jeans or trousers");
+  } else {
+    clothing.push("Warm jacket", "Sweaters", "Thermal layers", "Scarf", "Gloves");
+  }
+  if (willRain) clothing.push("Rain jacket", "Waterproof shoes");
+  if (avgLow < 5) clothing.push("Heavy coat", "Warm socks");
+
+  essentials.push("Phone charger", "Power bank", "Toiletries", "First-aid kit", "Reusable water bottle");
+  if (willRain) essentials.push("Umbrella");
+  if (avgHigh >= 25) essentials.push("Sunscreen SPF 50+", "Insect repellent");
+
+  documents.push("Passport / ID", "Travel insurance", "Flight tickets", "Hotel reservations", "Emergency contacts");
+  if (req.preferences?.accessibility) documents.push("Medical / accessibility documents");
+
+  return [
+    { category: "Clothing", items: clothing },
+    { category: "Essentials", items: essentials },
+    { category: "Documents", items: documents },
+  ];
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -642,6 +766,171 @@ Deno.serve(async (req: Request) => {
         weather,
         map_center: center,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    if (action === "orchestrate") {
+      const destination = body.destination ?? "";
+      if (!destination) {
+        return new Response(JSON.stringify({ error: "Destination is required" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          const encoder = new TextEncoder();
+          const send = (event: string, data: unknown) => {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          };
+          const stepId = (id: string) => send("step", { id, status: "active" });
+          const stepDone = (id: string, detail?: unknown) => send("step", { id, status: "done", detail });
+          const stepError = (id: string, msg: string) => send("step", { id, status: "error", message: msg });
+
+          try {
+            // Step 1: Understanding Request
+            stepId("understand");
+            await new Promise((r) => setTimeout(r, 300));
+            stepDone("understand", { destination, departure: body.departure_city });
+
+            // Step 2: Collecting Missing Information
+            stepId("collect");
+            const missing = missingFields(body);
+            await new Promise((r) => setTimeout(r, 300));
+            if (missing.length > 0) {
+              stepDone("collect", { missing, questions: missing.map((f) => `What is your ${f.replace(/_/g, " ")}?`) });
+              send("needs_info", { missing_fields: missing, questions: missing.map((f) => `What is your ${f.replace(/_/g, " ")}?`) });
+              controller.close();
+              return;
+            }
+            stepDone("collect", { missing: [] });
+
+            // Step 3: Checking Weather
+            stepId("weather");
+            let liveWeather: LiveWeatherDay[] = [];
+            try {
+              liveWeather = await fetchLiveWeather(destination, body.start_date, body.end_date);
+              stepDone("weather", { days: liveWeather.length });
+            } catch (e) {
+              stepError("weather", e instanceof Error ? e.message : "Weather fetch failed");
+            }
+
+            // Step 4: Finding Hotels
+            stepId("hotels");
+            let center: GeoPoint | null = null;
+            try {
+              center = await geocode(destination);
+            } catch { /* non-fatal */ }
+            let hotelPlaces: DiscoveryPlace[] = [];
+            try {
+              if (center) hotelPlaces = await fetchDiscoveryPlaces(center, "accommodation", 8);
+              stepDone("hotels", { count: hotelPlaces.length });
+            } catch (e) {
+              stepError("hotels", e instanceof Error ? e.message : "Hotel search failed");
+            }
+
+            // Step 5: Finding Restaurants
+            stepId("restaurants");
+            let restaurantPlaces: DiscoveryPlace[] = [];
+            try {
+              if (center) restaurantPlaces = await fetchDiscoveryPlaces(center, "catering", 8);
+              stepDone("restaurants", { count: restaurantPlaces.length });
+            } catch (e) {
+              stepError("restaurants", e instanceof Error ? e.message : "Restaurant search failed");
+            }
+
+            // Step 6: Finding Attractions
+            stepId("attractions");
+            let attractionPlaces: DiscoveryPlace[] = [];
+            try {
+              if (center) attractionPlaces = await fetchDiscoveryPlaces(center, "tourism", 8);
+              stepDone("attractions", { count: attractionPlaces.length });
+            } catch (e) {
+              stepError("attractions", e instanceof Error ? e.message : "Attraction search failed");
+            }
+
+            // Step 7: Optimizing Route
+            stepId("route");
+            let routeKm = 0;
+            let routeOrder: number[] = [];
+            try {
+              const allPoints: GeoPoint[] = [];
+              const placeMap: string[] = [];
+              for (const p of [...attractionPlaces, ...restaurantPlaces, ...hotelPlaces]) {
+                if (typeof p.lat === "number" && typeof p.lon === "number") {
+                  allPoints.push({ lat: p.lat, lon: p.lon });
+                  placeMap.push(p.name);
+                }
+              }
+              if (allPoints.length > 1) {
+                routeOrder = optimizeRoute(allPoints);
+                routeKm = routeTotalKm(allPoints, routeOrder);
+              }
+              stepDone("route", { km: routeKm, stops: routeOrder.length });
+            } catch (e) {
+              stepError("route", e instanceof Error ? e.message : "Route optimization failed");
+            }
+
+            // Step 8: Calculating Budget
+            stepId("budget");
+            const numDays = Math.max(1, daysBetween(body.start_date, body.end_date));
+            const budget = estimateBudget(body, liveWeather, numDays);
+            stepDone("budget", budget);
+
+            // Step 9: Generating Itinerary (Gemini)
+            stepId("itinerary");
+            let plan: Record<string, unknown> = {};
+            try {
+              const prompt = buildUserPrompt(body, liveWeather);
+              const text = await callGemini(prompt);
+              plan = tryParseJson(text) as Record<string, unknown>;
+              if (liveWeather.length > 0) plan.weather = liveWeather;
+              // Override with real places if we got them
+              if (hotelPlaces.length > 0) plan.hotels = hotelPlaces;
+              if (restaurantPlaces.length > 0) plan.restaurants = restaurantPlaces;
+              if (attractionPlaces.length > 0) plan.attractions = attractionPlaces;
+              if (center) plan.map_center = center;
+              plan.budget = budget;
+              if (routeKm > 0) (plan as { transportation?: Record<string, unknown> }).transportation = { ...((plan as { transportation?: Record<string, unknown> }).transportation ?? {}), route_km: routeKm, route_stops: routeOrder.length };
+              stepDone("itinerary", { days: numDays });
+            } catch (e) {
+              stepError("itinerary", e instanceof Error ? e.message : "Itinerary generation failed");
+            }
+
+            // Step 10: Creating Packing List
+            stepId("packing");
+            const packing = generatePackingList(liveWeather, body);
+            plan.packing = packing;
+            stepDone("packing", { items: packing.reduce((s, c) => s + c.items.length, 0) });
+
+            // Step 11: Creating PDF (client-side — signal the frontend)
+            stepId("pdf");
+            await new Promise((r) => setTimeout(r, 200));
+            stepDone("pdf", { ready: true });
+
+            // Step 12: Saving Trip (client-side via Supabase — signal the frontend)
+            stepId("save");
+            await new Promise((r) => setTimeout(r, 200));
+            stepDone("save", { ready: true });
+
+            // Final: send the complete plan
+            send("complete", { plan });
+            controller.close();
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            send("error", { message: msg });
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
     }
 
     if (action === "chat") {
