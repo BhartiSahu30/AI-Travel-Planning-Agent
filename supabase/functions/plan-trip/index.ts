@@ -11,11 +11,6 @@ const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const OPENWEATHER_API_KEY = Deno.env.get("OPENWEATHER_API_KEY") ?? "";
 const GEOAPIFY_API_KEY = Deno.env.get("GEOAPIFY_API_KEY") ?? "";
 const UNSPLASH_API_KEY = Deno.env.get("UNSPLASH_API_KEY") ?? "";
-
-const DEFAULT_HERO_IMAGE =
-  "https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=1600&q=80";
-const DEFAULT_PLACE_IMAGE =
-  "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=600&q=80";
 // Model: gemini-3.5-flash (current stable; gemini-2.5-flash is deprecated for new users)
 const GEMINI_MODEL = "gemini-3.5-flash";
 
@@ -448,17 +443,56 @@ async function fillMissingCoords(
   }
 }
 
-// ---- Unsplash images ----
+// ---- Destination image search (Unsplash + Wikimedia Commons fallback) ----
 
-interface UnsplashImage {
+interface DestinationImage {
   id: string;
-  urls: { regular: string; small: string; full: string };
-  alt_description: string | null;
-  user: { name: string };
-  links?: { html?: string };
+  url: string;
+  thumb: string;
+  alt: string;
+  credit: string;
 }
 
-async function fetchUnsplashImages(query: string, perPage: number): Promise<UnsplashImage[]> {
+function buildSearchQueries(destination: string): string[] {
+  const d = destination.trim();
+  if (!d) return [];
+  // Unsplash queries (can include descriptive words)
+  const queries = [`${d} travel`, `${d} tourism`, `${d} landscape`, `${d} city`];
+  // India-specific destinations get richer queries
+  const indiaDests = ["rajasthan", "goa", "manali", "kerala", "jaipur", "udaipur", "delhi", "mumbai", "agra", "varanasi", "rishikesh", "darjeeling"];
+  if (indiaDests.some((ind) => d.toLowerCase().includes(ind))) {
+    queries.push(`${d} India`, `${d} India travel`);
+  }
+  // Region-specific expansions
+  const lower = d.toLowerCase();
+  if (lower.includes("rajasthan")) queries.push("Jaipur Rajasthan", "Udaipur Rajasthan", "Jodhpur Rajasthan");
+  if (lower.includes("goa")) queries.push("Goa beach India", "Goa India beach");
+  if (lower.includes("manali")) queries.push("Manali Himachal Pradesh", "Manali mountains India");
+  if (lower.includes("dubai")) queries.push("Dubai UAE skyline", "Dubai city UAE");
+  return queries;
+}
+
+// Wikimedia queries: use ONLY the destination name to avoid matching
+// unrelated content (e.g. "Goa travel" matches "Carlsbad Caverns travel")
+function buildWikimediaQueries(destination: string): string[] {
+  const d = destination.trim();
+  if (!d) return [];
+  const lower = d.toLowerCase();
+  const queries = [d];
+  // India-specific: append "India" to disambiguate
+  const indiaDests = ["rajasthan", "goa", "manali", "kerala", "jaipur", "udaipur", "delhi", "mumbai", "agra", "varanasi", "rishikesh", "darjeeling"];
+  if (indiaDests.some((ind) => lower.includes(ind))) {
+    queries.push(`${d} India`);
+  }
+  // Region-specific sub-destinations for better photos
+  if (lower.includes("rajasthan")) queries.push("Jaipur", "Udaipur", "Jodhpur Rajasthan");
+  if (lower.includes("goa")) queries.push("Goa beach", "Panaji Goa");
+  if (lower.includes("manali")) queries.push("Manali Himachal Pradesh", "Solang Valley");
+  if (lower.includes("dubai")) queries.push("Dubai skyline", "Burj Khalifa Dubai");
+  return queries;
+}
+
+async function fetchUnsplashImages(query: string, perPage: number): Promise<DestinationImage[]> {
   if (!UNSPLASH_API_KEY) return [];
   const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape&content_filter=high`;
   const res = await fetch(url, {
@@ -468,20 +502,83 @@ async function fetchUnsplashImages(query: string, perPage: number): Promise<Unsp
     },
   });
   if (!res.ok) {
-    console.warn(`Unsplash error ${res.status}`);
+    console.warn(`Unsplash error ${res.status} for query "${query}"`);
     return [];
   }
   const data = await res.json();
-  return (data?.results ?? []) as UnsplashImage[];
+  return ((data?.results ?? []) as UnsplashImage[]).map((img) => ({
+    id: img.id,
+    url: img.urls.regular,
+    thumb: img.urls.small,
+    alt: img.alt_description ?? `${query} photo`,
+    credit: img.user.name,
+  }));
 }
 
-function defaultGallery(destination: string): UnsplashImage[] {
-  return Array.from({ length: 6 }, (_, i) => ({
-    id: `default-${i}`,
-    urls: { regular: DEFAULT_PLACE_IMAGE, small: DEFAULT_PLACE_IMAGE, full: DEFAULT_HERO_IMAGE },
-    alt_description: `${destination} travel photo`,
-    user: { name: "Unsplash" },
-  }));
+// Wikimedia Commons — free, no API key, destination-specific
+async function fetchWikimediaImages(query: string, perPage: number): Promise<DestinationImage[]> {
+  // Search for files in the "Travel" or "Places" category with the query
+  const url = `https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrnamespace=6&gsrlimit=${perPage}&prop=imageinfo&iiprop=url|extmetadata&iiurlwidth=1080&origin=*`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.warn(`Wikimedia error ${res.status} for query "${query}"`);
+    return [];
+  }
+  const data = await res.json();
+  const pages = data?.query?.pages;
+  if (!pages) return [];
+  const images: DestinationImage[] = [];
+  for (const page of Object.values(pages) as Record<string, unknown>[]) {
+    const imageInfo = (page as { imageinfo?: Array<Record<string, unknown>> }).imageinfo;
+    if (!imageInfo || imageInfo.length === 0) continue;
+    const info = imageInfo[0];
+    const fullUrl = info.url as string;
+    const thumbUrl = (info.thumburl as string) ?? fullUrl;
+    const meta = info.extmetadata as { ImageDescription?: { value: string } } | undefined;
+    const desc = meta?.ImageDescription?.value ?? `${query} photo`;
+    // Strip HTML from description
+    const cleanDesc = desc.replace(/<[^>]*>/g, "").slice(0, 120) || `${query} photo`;
+    const title = (page as { title?: string }).title ?? "Wikimedia";
+    images.push({
+      id: title,
+      url: fullUrl,
+      thumb: thumbUrl,
+      alt: cleanDesc,
+      credit: "Wikimedia Commons",
+    });
+  }
+  return images;
+}
+
+async function fetchDestinationImages(destination: string, targetCount: number): Promise<DestinationImage[]> {
+  const unsplashQueries = buildSearchQueries(destination);
+  const wikimediaQueries = buildWikimediaQueries(destination);
+  const seen = new Set<string>();
+  const collected: DestinationImage[] = [];
+
+  // Try Unsplash first (if key configured), then Wikimedia Commons as fallback
+  for (let i = 0; collected.length < targetCount; i++) {
+    const uQuery = unsplashQueries[i];
+    const wQuery = wikimediaQueries[i];
+    if (!uQuery && !wQuery) break;
+
+    let results: DestinationImage[] = [];
+    if (UNSPLASH_API_KEY && uQuery) {
+      results = await fetchUnsplashImages(uQuery, targetCount - collected.length).catch(() => []);
+    }
+    if (results.length === 0 && wQuery) {
+      results = await fetchWikimediaImages(wQuery, targetCount - collected.length).catch(() => []);
+    }
+    for (const img of results) {
+      if (!seen.has(img.id) && !seen.has(img.url)) {
+        seen.add(img.id);
+        seen.add(img.url);
+        collected.push(img);
+        if (collected.length >= targetCount) break;
+      }
+    }
+  }
+  return collected;
 }
 
 // ---- Geoapify Places with details ----
@@ -737,7 +834,7 @@ Deno.serve(async (req: Request) => {
 
       // Fetch images, places, weather, and AI highlights in parallel (non-fatal)
       const [images, hotels, restaurants, attractions, highlights, weather] = await Promise.all([
-        fetchUnsplashImages(`${destination} travel`, 12).catch(() => []),
+        fetchDestinationImages(destination, 8).catch(() => []),
         center ? fetchDiscoveryPlaces(center, "accommodation", 8).catch(() => []) : Promise.resolve([]),
         center ? fetchDiscoveryPlaces(center, "catering", 8).catch(() => []) : Promise.resolve([]),
         center ? fetchDiscoveryPlaces(center, "tourism", 8).catch(() => []) : Promise.resolve([]),
@@ -745,19 +842,15 @@ Deno.serve(async (req: Request) => {
         fetchLiveWeather(destination, undefined, undefined).catch(() => []),
       ]);
 
-      const gallery = images.length > 0 ? images : defaultGallery(destination);
-      const hero = gallery[0]?.urls?.full ?? gallery[0]?.urls?.regular ?? DEFAULT_HERO_IMAGE;
+      const gallery = images;
+      const galleryEmpty = gallery.length === 0;
+      const hero = gallery.length > 0 ? gallery[0].url : "";
 
       return new Response(JSON.stringify({
         destination,
         hero_image: hero,
-        gallery: gallery.map((img) => ({
-          id: img.id,
-          url: img.urls.regular,
-          thumb: img.urls.small,
-          alt: img.alt_description ?? `${destination} travel photo`,
-          credit: img.user.name,
-        })),
+        gallery,
+        gallery_empty: galleryEmpty,
         famous_places: highlights.places,
         local_foods: highlights.foods,
         hotels,

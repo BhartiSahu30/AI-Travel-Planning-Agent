@@ -184,6 +184,7 @@ export interface DiscoveryResponse {
   destination: string;
   hero_image: string;
   gallery: DiscoveryGalleryImage[];
+  gallery_empty: boolean;
   famous_places: FamousPlace[];
   local_foods: LocalFood[];
   hotels: DiscoveryPlace[];

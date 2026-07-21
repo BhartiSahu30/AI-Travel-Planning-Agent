@@ -270,47 +270,70 @@ export function DestinationDiscovery() {
         )}
 
         {data && !loading && (
-          <motion.div key="results" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-10">
+          <motion.div key={`results-${data.destination}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-10">
             {/* Hero banner */}
-            <motion.div
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.5 }}
-              className="relative h-72 overflow-hidden rounded-2xl sm:h-80"
-            >
-              <img src={data.hero_image} alt={data.destination} className="h-full w-full object-cover" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
-              <div className="absolute bottom-0 left-0 p-6 sm:p-8">
-                <h1 className="font-display text-3xl font-bold text-white sm:text-4xl">{data.destination}</h1>
-                <p className="mt-1 text-sm text-white/80">Discover what makes this destination special</p>
-              </div>
-            </motion.div>
+            {data.hero_image ? (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.5 }}
+                className="relative h-72 overflow-hidden rounded-2xl sm:h-80"
+              >
+                <img src={data.hero_image} alt={data.destination} className="h-full w-full object-cover" />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+                <div className="absolute bottom-0 left-0 p-6 sm:p-8">
+                  <h1 className="font-display text-3xl font-bold text-white sm:text-4xl">{data.destination}</h1>
+                  <p className="mt-1 text-sm text-white/80">Discover what makes this destination special</p>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.5 }}
+                className="relative flex h-48 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 sm:h-56"
+              >
+                <div className="absolute inset-0 bg-gradient-to-t from-black/30 to-transparent" />
+                <div className="absolute bottom-0 left-0 p-6 sm:p-8">
+                  <h1 className="font-display text-3xl font-bold text-white sm:text-4xl">{data.destination}</h1>
+                  <p className="mt-1 text-sm text-white/80">Discover what makes this destination special</p>
+                </div>
+              </motion.div>
+            )}
 
             {/* Destination Gallery */}
             <section>
-              <SectionTitle icon={ImageOff} title="Destination Gallery" subtitle="Real photos from Unsplash" />
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                {data.gallery.slice(0, 8).map((img, i) => (
-                  <motion.div
-                    key={img.id}
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.3, delay: i * 0.04 }}
-                    className="group relative overflow-hidden rounded-xl"
-                  >
-                    <img
-                      src={img.url}
-                      alt={img.alt}
-                      loading="lazy"
-                      className="h-40 w-full object-cover transition-transform duration-500 group-hover:scale-110"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 transition group-hover:opacity-100" />
-                    <p className="absolute bottom-2 left-2 text-xs text-white/0 transition group-hover:text-white/80">
-                      by {img.credit}
-                    </p>
-                  </motion.div>
-                ))}
-              </div>
+              <SectionTitle icon={ImageOff} title="Destination Gallery" subtitle="Real photos from Unsplash & Wikimedia Commons" />
+              {data.gallery_empty || data.gallery.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-ink-300 py-12 text-center dark:border-ink-700">
+                  <ImageOff className="h-10 w-10 text-ink-400" />
+                  <p className="mt-3 text-sm font-medium text-ink-600 dark:text-ink-300">No destination images found</p>
+                  <p className="mt-1 text-xs text-ink-400">We couldn't find photos for "{data.destination}". Try a more specific destination name.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  {data.gallery.slice(0, 8).map((img, i) => (
+                    <motion.div
+                      key={`${data.destination}-${img.id}`}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.3, delay: i * 0.04 }}
+                      className="group relative overflow-hidden rounded-xl"
+                    >
+                      <img
+                        src={img.url}
+                        alt={img.alt}
+                        loading="lazy"
+                        className="h-40 w-full object-cover transition-transform duration-500 group-hover:scale-110"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 transition group-hover:opacity-100" />
+                      <p className="absolute bottom-2 left-2 text-xs text-white/0 transition group-hover:text-white/80">
+                        by {img.credit}
+                      </p>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
             </section>
 
             {/* Famous Places (AI) */}
