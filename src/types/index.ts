@@ -33,6 +33,24 @@ export interface TripPreferences {
   notes?: string;
 }
 
+export type PlaceCategory = 'hotel' | 'restaurant' | 'attraction' | 'activity' | 'cafe';
+
+export interface Recommendation {
+  id: string;
+  name: string;
+  category: PlaceCategory;
+  address: string;
+  lat: number;
+  lon: number;
+  rating: number | null;
+  image: string | null;
+  description: string;
+  price_range: string | null;
+  opening_hours: string | null;
+  distance_km: number | null;
+  source: 'geoapify' | 'ai';
+}
+
 export interface Trip {
   id: string;
   user_id: string;
@@ -69,38 +87,13 @@ export interface TripPlan {
     icon: string;
   }[];
   map_center?: { lat: number; lon: number };
-  hotels: {
-    name: string;
-    price_per_night: number;
-    rating: number;
-    area: string;
-    reason: string;
-    amenities: string[];
-    lat?: number;
-    lon?: number;
-  }[];
-  restaurants: {
-    name: string;
-    cuisine: string;
-    price_level: number;
-    rating: number;
-    reason: string;
-    lat?: number;
-    lon?: number;
-  }[];
-  attractions: {
-    name: string;
-    category: string;
-    duration_hours: number;
-    rating: number;
-    reason: string;
-    lat?: number;
-    lon?: number;
-  }[];
+  recommendations: Recommendation[];
   transportation: {
     to_destination: string;
     local: string;
     estimated_cost: number;
+    route_km?: number;
+    route_stops?: number;
   };
   packing: { category: string; items: string[] }[];
   itinerary: {
@@ -114,6 +107,7 @@ export interface TripPlan {
       description: string;
       location: string;
       duration_hours: number;
+      recommendation_id?: string;
     }[];
   }[];
   tips: string[];
@@ -159,17 +153,6 @@ export interface DiscoveryGalleryImage {
   credit: string;
 }
 
-export interface DiscoveryPlace {
-  name: string;
-  category: string;
-  address: string;
-  rating: number | null;
-  lat: number;
-  lon: number;
-  image: string | null;
-  description: string;
-}
-
 export interface LocalFood {
   name: string;
   description: string;
@@ -187,9 +170,7 @@ export interface DiscoveryResponse {
   gallery_empty: boolean;
   famous_places: FamousPlace[];
   local_foods: LocalFood[];
-  hotels: DiscoveryPlace[];
-  restaurants: DiscoveryPlace[];
-  attractions: DiscoveryPlace[];
+  recommendations: Recommendation[];
   weather: {
     date: string;
     condition: string;

@@ -1,13 +1,16 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
+import type { PlaceCategory } from '../types';
 
 export interface MapMarker {
   id: string;
   name: string;
   lat: number;
   lon: number;
-  category: 'hotel' | 'restaurant' | 'attraction';
+  category: PlaceCategory;
   subtitle?: string;
+  image?: string | null;
+  address?: string;
 }
 
 interface MapViewProps {
@@ -16,10 +19,12 @@ interface MapViewProps {
   height?: string;
 }
 
-const COLORS: Record<MapMarker['category'], string> = {
+const COLORS: Record<PlaceCategory, string> = {
   hotel: '#2563eb',
   restaurant: '#f59e0b',
   attraction: '#10b981',
+  cafe: '#ea580c',
+  activity: '#7c3aed',
 };
 
 function makeIcon(color: string): L.DivIcon {
@@ -30,6 +35,23 @@ function makeIcon(color: string): L.DivIcon {
     iconAnchor: [9, 18],
     popupAnchor: [0, -16],
   });
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function buildPopup(m: MapMarker): string {
+  const img = m.image
+    ? `<img src="${escapeHtml(m.image)}" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:6px" onerror="this.style.display='none'"/>`
+    : '';
+  const addr = m.address
+    ? `<span style="font-size:11px;color:#64748b;display:block;margin-top:2px">${escapeHtml(m.address)}</span>`
+    : '';
+  const subtitle = m.subtitle
+    ? `<span style="font-size:11px;color:#64748b;display:block">${escapeHtml(m.subtitle)}</span>`
+    : '';
+  return `<div style="min-width:180px;max-width:220px">${img}<strong style="font-size:13px">${escapeHtml(m.name)}</strong>${subtitle}${addr}<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.name)}&query_place_id=${m.lat},${m.lon}" target="_blank" rel="noopener" style="display:inline-block;margin-top:6px;font-size:11px;color:#2563eb;text-decoration:none">View on Google Maps →</a></div>`;
 }
 
 export function MapView({ center, markers, height = '380px' }: MapViewProps) {
@@ -74,10 +96,10 @@ export function MapView({ center, markers, height = '380px' }: MapViewProps) {
 
     for (const m of markers) {
       if (typeof m.lat !== 'number' || typeof m.lon !== 'number') continue;
-      const icon = makeIcon(COLORS[m.category]);
+      const color = COLORS[m.category] ?? COLORS.attraction;
+      const icon = makeIcon(color);
       const marker = L.marker([m.lat, m.lon], { icon }).addTo(layer);
-      const subtitle = m.subtitle ? `<br/><span style="font-size:11px;color:#64748b">${m.subtitle}</span>` : '';
-      marker.bindPopup(`<strong>${m.name}</strong>${subtitle}`);
+      marker.bindPopup(buildPopup(m), { maxWidth: 240 });
       bounds.push([m.lat, m.lon]);
     }
 
@@ -90,3 +112,11 @@ export function MapView({ center, markers, height = '380px' }: MapViewProps) {
 
   return <div ref={containerRef} style={{ height, width: '100%', borderRadius: '12px', overflow: 'hidden' }} />;
 }
+
+export const CATEGORY_LEGEND: { category: PlaceCategory; label: string; color: string }[] = [
+  { category: 'hotel', label: 'Hotels', color: COLORS.hotel },
+  { category: 'restaurant', label: 'Restaurants', color: COLORS.restaurant },
+  { category: 'attraction', label: 'Attractions', color: COLORS.attraction },
+  { category: 'cafe', label: 'Cafés', color: COLORS.cafe },
+  { category: 'activity', label: 'Activities', color: COLORS.activity },
+];

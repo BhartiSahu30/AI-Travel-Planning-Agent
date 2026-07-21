@@ -11,8 +11,6 @@ import {
   Plane,
   Search,
   Sparkles,
-  Star,
-  UtensilsCrossed,
   Umbrella,
   Utensils,
 } from 'lucide-react';
@@ -22,7 +20,9 @@ import { Skeleton } from '../components/ui/Skeleton';
 import { MapView, type MapMarker } from '../components/MapView';
 import { discoverDestination } from '../lib/api';
 import { formatDate } from '../lib/utils';
-import type { DiscoveryPlace, DiscoveryResponse, LocalFood, FamousPlace } from '../types';
+import type { DiscoveryResponse, LocalFood, FamousPlace, Recommendation, PlaceCategory } from '../types';
+import { RecommendationCard } from '../components/RecommendationCard';
+import { CATEGORY_LEGEND } from '../components/MapView';
 
 function SectionTitle({ icon: Icon, title, subtitle }: { icon: typeof MapPin; title: string; subtitle?: string }) {
   return (
@@ -35,72 +35,6 @@ function SectionTitle({ icon: Icon, title, subtitle }: { icon: typeof MapPin; ti
         {subtitle && <p className="text-sm text-ink-500 dark:text-ink-400">{subtitle}</p>}
       </div>
     </div>
-  );
-}
-
-function PlaceImage({ src, alt, className }: { src: string | null; alt: string; className?: string }) {
-  const [errored, setErrored] = useState(false);
-  if (!src || errored) {
-    return (
-      <div className={className}>
-        <div className="flex h-full w-full items-center justify-center bg-ink-100 dark:bg-ink-800">
-          <ImageOff className="h-8 w-8 text-ink-400" />
-        </div>
-      </div>
-    );
-  }
-  return <img src={src} alt={alt} loading="lazy" onError={() => setErrored(true)} className={className} />;
-}
-
-function RatingStars({ rating }: { rating: number | null }) {
-  if (rating === null) return null;
-  return (
-    <span className="flex items-center gap-0.5 text-amber-500">
-      <Star className="h-3.5 w-3.5 fill-current" />
-      <span className="text-xs font-medium text-ink-700 dark:text-ink-200">{rating.toFixed(1)}</span>
-    </span>
-  );
-}
-
-function PlaceCard({ place, index, category }: { place: DiscoveryPlace; index: number; category: 'hotel' | 'restaurant' | 'attraction' }) {
-  const colorMap = {
-    hotel: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-    restaurant: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-    attraction: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
-  };
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay: index * 0.05 }}
-    >
-      <Card hover className="h-full overflow-hidden">
-        <div className="relative h-40 w-full overflow-hidden">
-          <PlaceImage
-            src={place.image}
-            alt={place.name}
-            className="h-full w-full object-cover transition-transform duration-500 hover:scale-105"
-          />
-          <span className={`absolute left-2 top-2 rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${colorMap[category]}`}>
-            {place.category}
-          </span>
-        </div>
-        <div className="p-4">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="font-medium leading-tight text-ink-900 dark:text-ink-50">{place.name}</h3>
-            <RatingStars rating={place.rating} />
-          </div>
-          {place.address && (
-            <p className="mt-1.5 flex items-start gap-1 text-xs text-ink-500 dark:text-ink-400">
-              <MapPin className="mt-0.5 h-3 w-3 shrink-0" /> {place.address}
-            </p>
-          )}
-          {place.description && (
-            <p className="mt-2 line-clamp-2 text-sm text-ink-600 dark:text-ink-300">{place.description}</p>
-          )}
-        </div>
-      </Card>
-    </motion.div>
   );
 }
 
@@ -202,22 +136,34 @@ export function DestinationDiscovery() {
     }
   }, [query]);
 
+  const recommendations: Recommendation[] = data?.recommendations ?? [];
+
   const mapMarkers: MapMarker[] = useMemo(() => {
     if (!data) return [];
-    const markers: MapMarker[] = [];
-    for (const h of data.hotels ?? []) {
-      markers.push({ id: `hotel-${h.name}`, name: h.name, lat: h.lat, lon: h.lon, category: 'hotel', subtitle: h.address });
-    }
-    for (const r of data.restaurants ?? []) {
-      markers.push({ id: `rest-${r.name}`, name: r.name, lat: r.lat, lon: r.lon, category: 'restaurant', subtitle: r.address });
-    }
-    for (const a of data.attractions ?? []) {
-      markers.push({ id: `attr-${a.name}`, name: a.name, lat: a.lat, lon: a.lon, category: 'attraction', subtitle: a.category });
-    }
-    return markers;
+    return (data.recommendations ?? []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      lat: r.lat,
+      lon: r.lon,
+      category: r.category as PlaceCategory,
+      subtitle: r.description?.slice(0, 60),
+      image: r.image,
+      address: r.address,
+    }));
   }, [data]);
 
-  const hasPlaces = (data?.hotels?.length ?? 0) > 0 || (data?.restaurants?.length ?? 0) > 0 || (data?.attractions?.length ?? 0) > 0;
+  const hasPlaces = recommendations.length > 0;
+
+  // Group recommendations by category for section display
+  const byCategory = useMemo(() => {
+    const m = new Map<PlaceCategory, Recommendation[]>();
+    for (const r of recommendations) {
+      const list = m.get(r.category) ?? [];
+      list.push(r);
+      m.set(r.category, list);
+    }
+    return m;
+  }, [recommendations]);
 
   return (
     <div className="space-y-8">
@@ -360,25 +306,20 @@ export function DestinationDiscovery() {
               </section>
             )}
 
-            {/* Hotels */}
-            {data.hotels.length > 0 && (
+            {/* Recommendations by category */}
+            {recommendations.length > 0 && (
               <section>
-                <SectionTitle icon={HotelIcon} title="Hotels" subtitle="Real places from Geoapify" />
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                  {data.hotels.map((p, i) => (
-                    <PlaceCard key={p.name + i} place={p} index={i} category="hotel" />
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {/* Restaurants */}
-            {data.restaurants.length > 0 && (
-              <section>
-                <SectionTitle icon={UtensilsCrossed} title="Restaurants" subtitle="Real places from Geoapify" />
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                  {data.restaurants.map((p, i) => (
-                    <PlaceCard key={p.name + i} place={p} index={i} category="restaurant" />
+                <SectionTitle icon={Sparkles} title="Recommendations" subtitle="Real places from Geoapify with photos, maps & directions" />
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {recommendations.slice(0, 12).map((rec, i) => (
+                    <motion.div
+                      key={rec.id}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, delay: i * 0.04 }}
+                    >
+                      <RecommendationCard rec={rec} userLocation={data.map_center} />
+                    </motion.div>
                   ))}
                 </div>
               </section>
@@ -416,13 +357,19 @@ export function DestinationDiscovery() {
             {/* Interactive Map */}
             {data.map_center && hasPlaces && (
               <section>
-                <SectionTitle icon={MapIcon} title="Interactive Map" subtitle="Hotels, restaurants & attractions" />
+                <SectionTitle icon={MapIcon} title="All Recommendations on Map" subtitle="Click markers for details" />
                 <Card>
-                  <MapView center={data.map_center} markers={mapMarkers} height="420px" />
+                  <MapView center={data.map_center} markers={mapMarkers} height="450px" />
                   <div className="mt-3 flex flex-wrap gap-4 px-1 pb-1 text-xs text-ink-500 dark:text-ink-400">
-                    <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-full bg-blue-600" /> Hotels</span>
-                    <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-full bg-amber-500" /> Restaurants</span>
-                    <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-full bg-emerald-500" /> Attractions</span>
+                    {CATEGORY_LEGEND.map((l) => {
+                      const has = byCategory.has(l.category);
+                      if (!has) return null;
+                      return (
+                        <span key={l.category} className="flex items-center gap-1.5">
+                          <span className="h-3 w-3 rounded-full" style={{ background: l.color }} /> {l.label}
+                        </span>
+                      );
+                    })}
                   </div>
                 </Card>
               </section>

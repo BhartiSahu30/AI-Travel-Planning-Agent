@@ -3,7 +3,6 @@ import { motion } from 'framer-motion';
 import {
   CloudSun,
   Droplets,
-  Hotel,
   Lightbulb,
   MapPin,
   Map as MapIcon,
@@ -11,34 +10,62 @@ import {
   Phone,
   Plane,
   Umbrella,
-  UtensilsCrossed,
   Sparkles,
   Star,
   Wallet,
+  LayoutGrid,
+  Hotel,
+  UtensilsCrossed,
+  Landmark,
+  Coffee,
+  Mountain,
 } from 'lucide-react';
 import { Badge } from './ui/Badge';
 import { Card, CardDescription, CardHeader, CardTitle } from './ui/Card';
-import { MapView, type MapMarker } from './MapView';
+import { MapView, CATEGORY_LEGEND, type MapMarker } from './MapView';
+import { RecommendationCard } from './RecommendationCard';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
-import type { TripPlan } from '../types';
+import type { TripPlan, PlaceCategory, Recommendation } from '../types';
+
+const FILTERS: { key: PlaceCategory | 'all'; label: string; icon: typeof Hotel }[] = [
+  { key: 'all', label: 'All', icon: LayoutGrid },
+  { key: 'hotel', label: 'Hotels', icon: Hotel },
+  { key: 'restaurant', label: 'Restaurants', icon: UtensilsCrossed },
+  { key: 'attraction', label: 'Attractions', icon: Landmark },
+  { key: 'cafe', label: 'Cafés', icon: Coffee },
+  { key: 'activity', label: 'Activities', icon: Mountain },
+];
 
 export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: string }) {
+  const [filter, setFilter] = useState<PlaceCategory | 'all'>('all');
+
+  const recommendations = (plan.recommendations ?? []) as Recommendation[];
+
+  const filtered = useMemo(() => {
+    if (filter === 'all') return recommendations;
+    return recommendations.filter((r) => r.category === filter);
+  }, [recommendations, filter]);
+
   const mapMarkers: MapMarker[] = useMemo(() => {
-    const markers: MapMarker[] = [];
-    for (const h of plan.hotels ?? []) {
-      if (typeof h.lat === 'number' && typeof h.lon === 'number')
-        markers.push({ id: `hotel-${h.name}`, name: h.name, lat: h.lat, lon: h.lon, category: 'hotel', subtitle: h.area });
-    }
-    for (const r of plan.restaurants ?? []) {
-      if (typeof r.lat === 'number' && typeof r.lon === 'number')
-        markers.push({ id: `rest-${r.name}`, name: r.name, lat: r.lat, lon: r.lon, category: 'restaurant', subtitle: r.cuisine });
-    }
-    for (const a of plan.attractions ?? []) {
-      if (typeof a.lat === 'number' && typeof a.lon === 'number')
-        markers.push({ id: `attr-${a.name}`, name: a.name, lat: a.lat, lon: a.lon, category: 'attraction', subtitle: a.category });
-    }
-    return markers;
-  }, [plan.hotels, plan.restaurants, plan.attractions]);
+    return recommendations.map((r) => ({
+      id: r.id,
+      name: r.name,
+      lat: r.lat,
+      lon: r.lon,
+      category: r.category,
+      subtitle: r.description?.slice(0, 60),
+      image: r.image,
+      address: r.address,
+    }));
+  }, [recommendations]);
+
+  // Build a lookup so itinerary activities can link to recommendations
+  const recByName = useMemo(() => {
+    const m = new Map<string, Recommendation>();
+    for (const r of recommendations) m.set(r.name.toLowerCase(), r);
+    return m;
+  }, [recommendations]);
+
   return (
     <div className="space-y-6">
       {/* Summary */}
@@ -120,33 +147,6 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
         </Card>
       </div>
 
-      {/* Interactive map */}
-      {plan.map_center && mapMarkers.length > 0 && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <MapIcon className="h-5 w-5 text-brand-600 dark:text-brand-300" />
-              <CardTitle>Destination map</CardTitle>
-              <CardDescription className="ml-auto">
-                {mapMarkers.length} places · powered by OpenStreetMap
-              </CardDescription>
-            </div>
-          </CardHeader>
-          <MapView center={plan.map_center} markers={mapMarkers} />
-          <div className="mt-3 flex flex-wrap gap-4 text-xs text-ink-500 dark:text-ink-400">
-            <span className="flex items-center gap-1.5">
-              <span className="h-3 w-3 rounded-full bg-blue-600" /> Hotels
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="h-3 w-3 rounded-full bg-amber-500" /> Restaurants
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="h-3 w-3 rounded-full bg-emerald-500" /> Attractions
-            </span>
-          </div>
-        </Card>
-      )}
-
       {/* Transportation */}
       <Card>
         <CardHeader>
@@ -173,89 +173,85 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
         </div>
       </Card>
 
-      {/* Hotels */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Hotel className="h-5 w-5 text-brand-600 dark:text-brand-300" />
-            <CardTitle>Recommended hotels</CardTitle>
+      {/* Recommendations with filter tabs */}
+      {recommendations.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center gap-2">
+              <Sparkles className="h-5 w-5 text-brand-600 dark:text-brand-300" />
+              <CardTitle>AI Recommendations</CardTitle>
+              <Badge className="ml-auto">{filtered.length} places</Badge>
+            </div>
+          </CardHeader>
+
+          {/* Filter tabs */}
+          <div className="mb-4 flex flex-wrap gap-2">
+            {FILTERS.map((f) => {
+              const Icon = f.icon;
+              const active = filter === f.key;
+              const count = f.key === 'all' ? recommendations.length : recommendations.filter((r) => r.category === f.key).length;
+              if (f.key !== 'all' && count === 0) return null;
+              return (
+                <button
+                  key={f.key}
+                  onClick={() => setFilter(f.key)}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition',
+                    active
+                      ? 'bg-brand-500 text-white shadow-sm'
+                      : 'bg-ink-100 text-ink-600 hover:bg-ink-200 dark:bg-ink-800 dark:text-ink-300 dark:hover:bg-ink-700'
+                  )}
+                >
+                  <Icon className="h-4 w-4" />
+                  {f.label}
+                  <span className={cn('text-xs', active ? 'text-white/70' : 'text-ink-400')}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
-        </CardHeader>
-        <div className="grid gap-4 sm:grid-cols-2">
-          {(plan.hotels ?? []).map((h) => (
-            <div key={h.name} className="rounded-xl border border-ink-200/60 bg-white/60 p-4 dark:border-ink-800 dark:bg-ink-900/40">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <p className="font-semibold text-ink-900 dark:text-ink-50">{h.name}</p>
-                  <p className="mt-0.5 flex items-center gap-1 text-xs text-ink-500">
-                    <MapPin className="h-3 w-3" /> {h.area}
-                  </p>
-                </div>
-                <Badge variant="brand">
-                  <Star className="h-3 w-3 fill-current" /> {h.rating}
-                </Badge>
-              </div>
-              <p className="mt-2 text-sm text-ink-600 dark:text-ink-300">{h.reason}</p>
-              <div className="mt-3 flex items-center justify-between">
-                <span className="text-sm font-semibold text-ink-900 dark:text-ink-100">
-                  {formatCurrency(h.price_per_night, currency)} <span className="text-xs font-normal text-ink-400">/ night</span>
+
+          {/* Cards grid */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {filtered.map((rec) => (
+              <RecommendationCard
+                key={rec.id}
+                rec={rec}
+                userLocation={plan.map_center ?? null}
+              />
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* View All Recommendations on Map */}
+      {plan.map_center && mapMarkers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <MapIcon className="h-5 w-5 text-brand-600 dark:text-brand-300" />
+              <CardTitle>All Recommendations on Map</CardTitle>
+              <CardDescription className="ml-auto">
+                {mapMarkers.length} places · powered by OpenStreetMap
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <MapView center={plan.map_center} markers={mapMarkers} height="450px" />
+          <div className="mt-3 flex flex-wrap gap-4 text-xs text-ink-500 dark:text-ink-400">
+            {CATEGORY_LEGEND.map((l) => {
+              const has = recommendations.some((r) => r.category === l.category);
+              if (!has) return null;
+              return (
+                <span key={l.category} className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-full" style={{ background: l.color }} />
+                  {l.label}
                 </span>
-                <div className="flex flex-wrap gap-1">
-                  {(h.amenities ?? []).slice(0, 3).map((a) => (
-                    <Badge key={a}>{a}</Badge>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {/* Restaurants */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <UtensilsCrossed className="h-5 w-5 text-accent-500" />
-            <CardTitle>Recommended restaurants</CardTitle>
+              );
+            })}
           </div>
-        </CardHeader>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {(plan.restaurants ?? []).map((r) => (
-            <div key={r.name} className="flex items-start justify-between gap-3 rounded-xl border border-ink-200/60 bg-white/60 p-4 dark:border-ink-800 dark:bg-ink-900/40">
-              <div>
-                <p className="font-semibold text-ink-900 dark:text-ink-50">{r.name}</p>
-                <p className="text-xs text-ink-500">{r.cuisine} · {'$'.repeat(r.price_level || 1)}</p>
-                <p className="mt-1 text-sm text-ink-600 dark:text-ink-300">{r.reason}</p>
-              </div>
-              <Badge variant="accent">
-                <Star className="h-3 w-3 fill-current" /> {r.rating}
-              </Badge>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {/* Attractions */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <MapPin className="h-5 w-5 text-brand-600 dark:text-brand-300" />
-            <CardTitle>Top attractions</CardTitle>
-          </div>
-        </CardHeader>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {(plan.attractions ?? []).map((a) => (
-            <div key={a.name} className="rounded-xl border border-ink-200/60 bg-white/60 p-4 dark:border-ink-800 dark:bg-ink-900/40">
-              <div className="flex items-start justify-between gap-2">
-                <p className="font-semibold text-ink-900 dark:text-ink-50">{a.name}</p>
-                <Badge>{a.category}</Badge>
-              </div>
-              <p className="mt-1 text-sm text-ink-600 dark:text-ink-300">{a.reason}</p>
-              <p className="mt-2 text-xs text-ink-400">{a.duration_hours}h · ★ {a.rating}</p>
-            </div>
-          ))}
-        </div>
-      </Card>
+        </Card>
+      )}
 
       {/* Itinerary timeline */}
       <Card>
@@ -263,7 +259,7 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
           <CardTitle>Day-by-day itinerary</CardTitle>
           <CardDescription>{(plan.itinerary ?? []).length} days of adventure.</CardDescription>
         </CardHeader>
-        <ItineraryTimeline itinerary={plan.itinerary ?? []} />
+        <ItineraryTimeline itinerary={plan.itinerary ?? []} recByName={recByName} userLocation={plan.map_center ?? null} />
       </Card>
 
       {/* Packing + Tips + Emergency */}
@@ -320,7 +316,15 @@ export function TripPlanView({ plan, currency }: { plan: TripPlan; currency: str
   );
 }
 
-function ItineraryTimeline({ itinerary }: { itinerary: TripPlan['itinerary'] }) {
+function ItineraryTimeline({
+  itinerary,
+  recByName,
+  userLocation,
+}: {
+  itinerary: TripPlan['itinerary'];
+  recByName: Map<string, Recommendation>;
+  userLocation: { lat: number; lon: number } | null;
+}) {
   const [openDay, setOpenDay] = useState(0);
   return (
     <div className="space-y-3">
@@ -352,26 +356,34 @@ function ItineraryTimeline({ itinerary }: { itinerary: TripPlan['itinerary'] }) 
               <div className="border-t border-ink-200/60 px-4 py-3 dark:border-ink-800">
                 <p className="mb-3 text-sm text-ink-600 dark:text-ink-300">{d.summary}</p>
                 <ol className="relative space-y-3 border-l-2 border-brand-200 pl-4 dark:border-brand-900">
-                  {(d.activities ?? []).map((a, j) => (
-                    <li key={j} className="relative">
-                      <span className={cn(
-                        'absolute -left-[1.32rem] top-1 h-2.5 w-2.5 rounded-full bg-brand-500 ring-4 ring-brand-100 dark:ring-brand-900/40'
-                      )} />
-                      <div className="flex items-baseline justify-between gap-2">
-                        <p className="text-sm font-semibold text-ink-900 dark:text-ink-50">{a.title}</p>
-                        <span className="text-xs text-ink-400">{a.time}</span>
-                      </div>
-                      {a.location && (
-                        <p className="mt-0.5 flex items-center gap-1 text-xs text-ink-500">
-                          <MapPin className="h-3 w-3" /> {a.location}
-                        </p>
-                      )}
-                      <p className="mt-1 text-sm text-ink-600 dark:text-ink-300">{a.description}</p>
-                      {a.duration_hours > 0 && (
-                        <p className="mt-1 text-xs text-ink-400">{a.duration_hours}h</p>
-                      )}
-                    </li>
-                  ))}
+                  {(d.activities ?? []).map((a, j) => {
+                    const rec = a.recommendation_id
+                      ? recByName.get(a.recommendation_id)
+                      : recByName.get(a.title?.toLowerCase() ?? '');
+                    return (
+                      <li key={j} className="relative">
+                        <span className="absolute -left-[1.32rem] top-1 h-2.5 w-2.5 rounded-full bg-brand-500 ring-4 ring-brand-100 dark:ring-brand-900/40" />
+                        <div className="flex items-baseline justify-between gap-2">
+                          <p className="text-sm font-semibold text-ink-900 dark:text-ink-50">{a.title}</p>
+                          <span className="text-xs text-ink-400">{a.time}</span>
+                        </div>
+                        {a.location && (
+                          <p className="mt-0.5 flex items-center gap-1 text-xs text-ink-500">
+                            <MapPin className="h-3 w-3" /> {a.location}
+                          </p>
+                        )}
+                        <p className="mt-1 text-sm text-ink-600 dark:text-ink-300">{a.description}</p>
+                        {a.duration_hours > 0 && (
+                          <p className="mt-1 text-xs text-ink-400">{a.duration_hours}h</p>
+                        )}
+                        {rec && (
+                          <div className="mt-2">
+                            <RecommendationCard rec={rec} userLocation={userLocation} />
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ol>
               </div>
             </motion.div>

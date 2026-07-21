@@ -512,7 +512,12 @@ async function fetchUnsplashImages(query: string, perPage: number): Promise<Dest
     return [];
   }
   const data = await res.json();
-  return ((data?.results ?? []) as UnsplashImage[]).map((img) => ({
+  return ((data?.results ?? []) as Array<{
+    id: string;
+    urls: { regular: string; small: string; full: string };
+    alt_description: string | null;
+    user: { name: string };
+  }>).map((img) => ({
     id: img.id,
     url: img.urls.regular,
     thumb: img.urls.small,
@@ -630,55 +635,155 @@ function selectHeroImage(images: DestinationImage[], destination: string): strin
   return sorted[0]?.url ?? "";
 }
 
-// ---- Geoapify Places with details ----
+// ---- Geoapify Places → Recommendation ----
 
-interface DiscoveryPlace {
+type PlaceCategory = "hotel" | "restaurant" | "attraction" | "activity" | "cafe";
+
+interface Recommendation {
+  id: string;
   name: string;
-  category: string;
+  category: PlaceCategory;
   address: string;
-  rating: number | null;
   lat: number;
   lon: number;
+  rating: number | null;
   image: string | null;
   description: string;
+  price_range: string | null;
+  opening_hours: string | null;
+  distance_km: number | null;
+  source: "geoapify" | "ai";
+}
+
+function normalizeCategory(geoapifyCats: string[], fallback: PlaceCategory = "attraction"): PlaceCategory {
+  const all = geoapifyCats.join(" ").toLowerCase();
+  // Check in priority order — more specific first
+  if (all.includes("accommodation") || all.includes("hotel") || all.includes("hostel") || all.includes("motel")) return "hotel";
+  if (all.includes("cafe") || all.includes("coffee") || all.includes("tea_room")) return "cafe";
+  if (all.includes("catering") || all.includes("restaurant") || all.includes("fast_food") || all.includes("pub")) return "restaurant";
+  if (all.includes("entertainment") || all.includes("leisure") || all.includes("sport") || all.includes("activity")) return "activity";
+  if (all.includes("tourism") || all.includes("heritage") || all.includes("museum") || all.includes("attraction") || all.includes("monument")) return "attraction";
+  // Fallback: use the explicit fallback passed in
+  return fallback;
+}
+
+function priceLevelToString(level: unknown): string | null {
+  if (typeof level === "string" && level.trim()) return level.trim();
+  if (typeof level === "number") {
+    if (level <= 1) return "$";
+    if (level === 2) return "$";
+    if (level === 3) return "$$";
+    if (level >= 4) return "$$";
+  }
+  return null;
+}
+
+async function fetchPlaceImage(placeName: string, destination: string, signal?: AbortSignal): Promise<string | null> {
+  // Try Wikimedia Commons for a place-specific image
+  const queries = [`${placeName} ${destination}`, placeName];
+  for (const q of queries) {
+    try {
+      const url = `https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrnamespace=6&gsrlimit=1&prop=imageinfo&iiprop=url&iiurlwidth=800&origin=*`;
+      const res = await fetch(url, { signal });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const pages = data?.query?.pages;
+      if (!pages) continue;
+      for (const page of Object.values(pages) as Record<string, unknown>[]) {
+        const info = (page as { imageinfo?: Array<Record<string, unknown>> }).imageinfo;
+        if (info && info.length > 0) {
+          const imgUrl = info[0].url as string;
+          // Skip non-photographic content
+          const title = ((page as { title?: string }).title ?? "").toLowerCase();
+          if (title.endsWith(".svg") || title.endsWith(".pdf") || title.includes("logo")) continue;
+          return imgUrl;
+        }
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
 }
 
 async function fetchDiscoveryPlaces(
   center: GeoPoint,
   categories: string,
-  limit: number
-): Promise<DiscoveryPlace[]> {
+  limit: number,
+  fallbackCategory: PlaceCategory = "attraction"
+): Promise<Recommendation[]> {
   if (!GEOAPIFY_API_KEY) return [];
   const radius = 10000;
   const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(categories)}&filter=circle:${center.lon},${center.lat},${radius}&limit=${limit}&apiKey=${GEOAPIFY_API_KEY}`;
   const res = await fetch(url);
   if (!res.ok) {
-    console.warn(`Geoapify Places error ${res.status}`);
+    console.warn(`Geoapify Places error ${res.status} for categories=${categories}`);
     return [];
   }
   const data = await res.json();
   const features = (data?.features ?? []) as GeoapifyResult[];
-  const places: DiscoveryPlace[] = [];
-  for (const f of features) {
+  const places: Recommendation[] = [];
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
     const props = f.properties;
     const [lon, lat] = f.geometry.coordinates;
     const cats = props.categories ?? {};
     const catKeys = Object.keys(cats);
     const raw = props.datasource?.raw ?? {};
+    const name = props.name ?? "Unknown";
+    const address = [
+      raw["addr:housenumber"], raw["addr:street"], raw["addr:suburb"], raw["addr:city"], raw["addr:state"], raw["addr:country"],
+    ].filter(Boolean).join(" ").trim() || raw["addr:full"] || raw["address"] || "";
+    const distance = haversineKm(center, { lat, lon });
     places.push({
-      name: props.name ?? "Unknown",
-      category: catKeys[0]?.replace(/\./g, " ") ?? "place",
-      address:
-        (raw["addr:housenumber"] ?? "") + " " + (raw["addr:street"] ?? "") + " " + (raw["addr:city"] ?? "") + " " + (raw["addr:country"] ?? "")
-          .trim() || raw["addr:full"] || raw["address"] || "",
-      rating: typeof raw["rating"] === "number" ? raw["rating"] : null,
+      id: `geo-${i}-${name.replace(/\s+/g, "-").toLowerCase().slice(0, 20)}`,
+      name,
+      category: normalizeCategory(catKeys, fallbackCategory),
+      address,
       lat,
       lon,
+      rating: typeof raw["rating"] === "number" ? raw["rating"] : null,
       image: null,
       description: raw["description"] ?? raw["wikipedia"] ?? cats[catKeys[0]] ?? "",
+      price_range: priceLevelToString(raw["price_level"] ?? raw["price"]),
+      opening_hours: typeof raw["opening_hours"] === "string" ? raw["opening_hours"] : null,
+      distance_km: Math.round(distance * 10) / 10,
+      source: "geoapify",
     });
   }
   return places;
+}
+
+// Fetch images for a batch of recommendations (in parallel, capped)
+async function enrichWithImages(recs: Recommendation[], destination: string, maxN: number): Promise<void> {
+  const toFetch = recs.filter((r) => !r.image).slice(0, maxN);
+  await Promise.allSettled(toFetch.map(async (r) => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      r.image = await fetchPlaceImage(r.name, destination, controller.signal);
+      clearTimeout(timeout);
+    } catch {
+      r.image = null;
+    }
+  }));
+}
+
+// Merge multiple Recommendation arrays, dedup by name, cap per category
+function mergeRecommendations(arrays: Recommendation[][], maxPerCategory: number): Recommendation[] {
+  const seen = new Set<string>();
+  const byCategory = new Map<PlaceCategory, Recommendation[]>();
+  for (const arr of arrays) {
+    for (const r of arr) {
+      const key = r.name.toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const list = byCategory.get(r.category) ?? [];
+      if (list.length < maxPerCategory) list.push(r);
+      byCategory.set(r.category, list);
+    }
+  }
+  return Array.from(byCategory.values()).flat();
 }
 
 // ---- Gemini local foods + famous places ----
@@ -882,18 +987,25 @@ Deno.serve(async (req: Request) => {
       }
 
       // Fetch images, places, weather, and AI highlights in parallel (non-fatal)
-      const [images, hotels, restaurants, attractions, highlights, weather] = await Promise.all([
+      const [images, hotels, restaurants, attractions, cafes, activities, highlights, weather] = await Promise.all([
         fetchDestinationImages(destination, 8).catch(() => []),
-        center ? fetchDiscoveryPlaces(center, "accommodation", 8).catch(() => []) : Promise.resolve([]),
-        center ? fetchDiscoveryPlaces(center, "catering", 8).catch(() => []) : Promise.resolve([]),
-        center ? fetchDiscoveryPlaces(center, "tourism", 8).catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "accommodation", 8, "hotel").catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "catering.restaurant", 8, "restaurant").catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "tourism", 8, "attraction").catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "catering.cafe", 6, "cafe").catch(() => []) : Promise.resolve([]),
+        center ? fetchDiscoveryPlaces(center, "entertainment,leisure,sport", 6, "activity").catch(() => []) : Promise.resolve([]),
         generateLocalHighlights(destination).catch(() => ({ foods: [], places: [] })),
         fetchLiveWeather(destination, undefined, undefined).catch(() => []),
       ]);
 
+      // Enrich places with images (parallel, capped)
+      const allPlaces = [...hotels, ...restaurants, ...attractions, ...cafes, ...activities];
+      await enrichWithImages(allPlaces, destination, 12);
+
       const gallery = images;
       const galleryEmpty = gallery.length === 0;
       const hero = selectHeroImage(gallery, destination);
+      const recommendations = mergeRecommendations([hotels, restaurants, attractions, cafes, activities], 8);
 
       return new Response(JSON.stringify({
         destination,
@@ -902,9 +1014,7 @@ Deno.serve(async (req: Request) => {
         gallery_empty: galleryEmpty,
         famous_places: highlights.places,
         local_foods: highlights.foods,
-        hotels,
-        restaurants,
-        attractions,
+        recommendations,
         weather,
         map_center: center,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -962,33 +1072,48 @@ Deno.serve(async (req: Request) => {
             try {
               center = await geocode(destination);
             } catch { /* non-fatal */ }
-            let hotelPlaces: DiscoveryPlace[] = [];
+            let hotelPlaces: Recommendation[] = [];
             try {
-              if (center) hotelPlaces = await fetchDiscoveryPlaces(center, "accommodation", 8);
+              if (center) hotelPlaces = await fetchDiscoveryPlaces(center, "accommodation", 8, "hotel");
               stepDone("hotels", { count: hotelPlaces.length });
             } catch (e) {
               stepError("hotels", e instanceof Error ? e.message : "Hotel search failed");
             }
 
-            // Step 5: Finding Restaurants
+            // Step 5: Finding Restaurants & Cafés
             stepId("restaurants");
-            let restaurantPlaces: DiscoveryPlace[] = [];
+            let restaurantPlaces: Recommendation[] = [];
+            let cafePlaces: Recommendation[] = [];
             try {
-              if (center) restaurantPlaces = await fetchDiscoveryPlaces(center, "catering", 8);
-              stepDone("restaurants", { count: restaurantPlaces.length });
+              if (center) {
+                [restaurantPlaces, cafePlaces] = await Promise.all([
+                  fetchDiscoveryPlaces(center, "catering.restaurant", 8, "restaurant"),
+                  fetchDiscoveryPlaces(center, "catering.cafe", 4, "cafe"),
+                ]);
+              }
+              stepDone("restaurants", { count: restaurantPlaces.length + cafePlaces.length });
             } catch (e) {
               stepError("restaurants", e instanceof Error ? e.message : "Restaurant search failed");
             }
 
-            // Step 6: Finding Attractions
+            // Step 6: Finding Attractions & Activities
             stepId("attractions");
-            let attractionPlaces: DiscoveryPlace[] = [];
+            let attractionPlaces: Recommendation[] = [];
+            let activityPlaces: Recommendation[] = [];
             try {
-              if (center) attractionPlaces = await fetchDiscoveryPlaces(center, "tourism", 8);
-              stepDone("attractions", { count: attractionPlaces.length });
+              if (center) {
+                [attractionPlaces, activityPlaces] = await Promise.all([
+                  fetchDiscoveryPlaces(center, "tourism", 8, "attraction"),
+                  fetchDiscoveryPlaces(center, "entertainment,leisure,sport", 4, "activity"),
+                ]);
+              }
+              stepDone("attractions", { count: attractionPlaces.length + activityPlaces.length });
             } catch (e) {
               stepError("attractions", e instanceof Error ? e.message : "Attraction search failed");
             }
+
+            // Step 6.5: Enrich places with images
+            await enrichWithImages([...hotelPlaces, ...restaurantPlaces, ...cafePlaces, ...attractionPlaces, ...activityPlaces], destination, 12);
 
             // Step 7: Optimizing Route
             stepId("route");
@@ -997,7 +1122,7 @@ Deno.serve(async (req: Request) => {
             try {
               const allPoints: GeoPoint[] = [];
               const placeMap: string[] = [];
-              for (const p of [...attractionPlaces, ...restaurantPlaces, ...hotelPlaces]) {
+              for (const p of [...attractionPlaces, ...activityPlaces, ...restaurantPlaces, ...cafePlaces, ...hotelPlaces]) {
                 if (typeof p.lat === "number" && typeof p.lon === "number") {
                   allPoints.push({ lat: p.lat, lon: p.lon });
                   placeMap.push(p.name);
@@ -1026,17 +1151,20 @@ Deno.serve(async (req: Request) => {
               const text = await callGemini(prompt);
               plan = tryParseJson(text) as Record<string, unknown>;
               if (liveWeather.length > 0) plan.weather = liveWeather;
-              // Override with real places if we got them
-              if (hotelPlaces.length > 0) plan.hotels = hotelPlaces;
-              if (restaurantPlaces.length > 0) plan.restaurants = restaurantPlaces;
-              if (attractionPlaces.length > 0) plan.attractions = attractionPlaces;
-              if (center) plan.map_center = center;
-              plan.budget = budget;
-              if (routeKm > 0) (plan as { transportation?: Record<string, unknown> }).transportation = { ...((plan as { transportation?: Record<string, unknown> }).transportation ?? {}), route_km: routeKm, route_stops: routeOrder.length };
               stepDone("itinerary", { days: numDays });
             } catch (e) {
               stepError("itinerary", e instanceof Error ? e.message : "Itinerary generation failed");
             }
+
+            // Always set recommendations, map_center, budget, and transportation
+            // (these come from real Geoapify data, not Gemini)
+            const recommendations = mergeRecommendations(
+              [hotelPlaces, restaurantPlaces, cafePlaces, attractionPlaces, activityPlaces], 8
+            );
+            if (recommendations.length > 0) plan.recommendations = recommendations;
+            if (center) plan.map_center = center;
+            plan.budget = budget;
+            if (routeKm > 0) (plan as { transportation?: Record<string, unknown> }).transportation = { ...((plan as { transportation?: Record<string, unknown> }).transportation ?? {}), route_km: routeKm, route_stops: routeOrder.length };
 
             // Step 10: Creating Packing List
             stepId("packing");
@@ -1123,10 +1251,25 @@ Deno.serve(async (req: Request) => {
       plan.weather = liveWeather;
     }
 
-    // Enrich hotels/restaurants/attractions with real coordinates from Geoapify Places
-    // (geocoded via Nominatim). Non-fatal — plan still returns without map data if it fails.
+    // Enrich with real places from Geoapify and build unified recommendations
     try {
-      await enrichPlanWithPlaces(plan as Record<string, unknown>, body.destination ?? "");
+      const dest = body.destination ?? "";
+      let center: GeoPoint | null = null;
+      try { center = await geocode(dest); } catch { /* non-fatal */ }
+      if (center) {
+        (plan as { map_center?: GeoPoint }).map_center = center;
+        const [hotels, restaurants, attractions, cafes, activities] = await Promise.all([
+          fetchDiscoveryPlaces(center, "accommodation", 8, "hotel").catch(() => []),
+          fetchDiscoveryPlaces(center, "catering.restaurant", 8, "restaurant").catch(() => []),
+          fetchDiscoveryPlaces(center, "tourism", 8, "attraction").catch(() => []),
+          fetchDiscoveryPlaces(center, "catering.cafe", 4, "cafe").catch(() => []),
+          fetchDiscoveryPlaces(center, "entertainment,leisure,sport", 4, "activity").catch(() => []),
+        ]);
+        const allPlaces = [...hotels, ...restaurants, ...attractions, ...cafes, ...activities];
+        await enrichWithImages(allPlaces, dest, 12);
+        const recommendations = mergeRecommendations([hotels, restaurants, cafes, attractions, activities], 8);
+        if (recommendations.length > 0) plan.recommendations = recommendations;
+      }
     } catch (e) {
       console.warn("Place enrichment failed:", e instanceof Error ? e.message : e);
     }
