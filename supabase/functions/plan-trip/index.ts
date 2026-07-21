@@ -478,15 +478,21 @@ function buildWikimediaQueries(destination: string): string[] {
   const d = destination.trim();
   if (!d) return [];
   const lower = d.toLowerCase();
-  const queries = [d];
-  // India-specific: append "India" to disambiguate
+  const queries: string[] = [];
+
+  // India-specific destinations: put India-specific queries FIRST to avoid
+  // matching unrelated places with the same name (e.g. Goa, Philippines)
   const indiaDests = ["rajasthan", "goa", "manali", "kerala", "jaipur", "udaipur", "delhi", "mumbai", "agra", "varanasi", "rishikesh", "darjeeling"];
-  if (indiaDests.some((ind) => lower.includes(ind))) {
+  const isIndia = indiaDests.some((ind) => lower.includes(ind));
+
+  if (isIndia) {
     queries.push(`${d} India`);
   }
+  queries.push(d);
+
   // Region-specific sub-destinations for better photos
   if (lower.includes("rajasthan")) queries.push("Jaipur", "Udaipur", "Jodhpur Rajasthan");
-  if (lower.includes("goa")) queries.push("Goa beach", "Panaji Goa");
+  if (lower.includes("goa")) queries.push("Goa beach India", "Panaji Goa", "Arambol Goa");
   if (lower.includes("manali")) queries.push("Manali Himachal Pradesh", "Solang Valley");
   if (lower.includes("dubai")) queries.push("Dubai skyline", "Burj Khalifa Dubai");
   return queries;
@@ -579,6 +585,49 @@ async function fetchDestinationImages(destination: string, targetCount: number):
     }
   }
   return collected;
+}
+
+// Select the most representative image for the hero banner.
+// Filters out maps, documents, logos, and non-photographic content,
+// then prioritizes images whose alt text or filename mentions the destination.
+function selectHeroImage(images: DestinationImage[], destination: string): string {
+  if (images.length === 0) return "";
+
+  const destLower = destination.toLowerCase().trim();
+  const destWords = destLower.split(/\s+/).filter((w) => w.length > 2);
+
+  // Reject non-photographic content
+  const isPhoto = (img: DestinationImage): boolean => {
+    const text = `${img.id} ${img.alt}`.toLowerCase();
+    const bad = ["map", "schematic", "diagram", "logo", "svg", "document", "chart", "graph", "flag", "coat of arms", "seal", "signage", "screenshot"];
+    return !bad.some((b) => text.includes(b));
+  };
+
+  // Score: how well does the image represent the destination?
+  const score = (img: DestinationImage): number => {
+    const text = `${img.id} ${img.alt}`.toLowerCase();
+    let s = 0;
+    if (text.includes(destLower)) s += 10;
+    for (const word of destWords) {
+      if (text.includes(word)) s += 3;
+    }
+    // Prefer images with descriptive alt text (not just the destination name alone)
+    if (img.alt.length > 30) s += 2;
+    // Prefer jpg/png (actual photos) over other formats
+    if (img.url.match(/\.(jpg|jpeg|png)/i)) s += 1;
+    // Boost tourism-relevant content (scenic, landmark, landscape photos)
+    const scenic = ["beach", "desert", "mountain", "fort", "palace", "temple", "mosque", "church", "skyline", "cityscape", "landscape", "sunset", "sunrise", "monument", "architecture", "heritage", "lake", "river", "valley", "island", "harbour", "harbor", "view", "panorama"];
+    if (scenic.some((kw) => text.includes(kw))) s += 5;
+    // Penalize infrastructure / mundane content
+    const mundane = ["airport", "station", "school", "hospital", "office", "factory", "warehouse", "parking", "industrial", "municipal", "hall", "building under"];
+    if (mundane.some((kw) => text.includes(kw))) s -= 4;
+    return s;
+  };
+
+  const photos = images.filter(isPhoto);
+  const pool = photos.length > 0 ? photos : images;
+  const sorted = pool.slice().sort((a, b) => score(b) - score(a));
+  return sorted[0]?.url ?? "";
 }
 
 // ---- Geoapify Places with details ----
@@ -844,7 +893,7 @@ Deno.serve(async (req: Request) => {
 
       const gallery = images;
       const galleryEmpty = gallery.length === 0;
-      const hero = gallery.length > 0 ? gallery[0].url : "";
+      const hero = selectHeroImage(gallery, destination);
 
       return new Response(JSON.stringify({
         destination,
